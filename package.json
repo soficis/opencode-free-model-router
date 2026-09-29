@@ -1,0 +1,10 @@
+{
+  "name": "opencode-free-model-router",
+  "version": "0.0.1",
+  "description": "Route opencode sessions to free-tier models.",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  }
+}

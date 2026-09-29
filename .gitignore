@@ -1,0 +1,11 @@
+*.keys
+*secret*
+*token*
+.env*
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
