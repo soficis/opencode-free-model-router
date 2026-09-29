@@ -198,10 +198,222 @@ async function toolExecuteBefore(
   }
 }
 
+// ---- 429 failover (todo 7) ------------------------------------------------
+// Contract (plan todo 7): tool.execute.after output text matching
+// 429|FreeUsageLimitError|rate.?limit|quota for the session's current free
+// model records it in state.failedIds; every later route walks via
+// nextCandidate(catalog, failedIds) - cap = catalog length, never a retry
+// loop. Exhaustion restores the session's prior paid model exactly once and
+// stages a notice for the todo-9 toast (this todo never calls showToast).
+// failedIds live only in this process's session store: a fresh sessionID
+// starts a fresh chain (never persisted across sessions).
+
+import { detectFree, nextCandidate } from "./lib";
+
+interface ToolAfterInput {
+  tool: string;
+  sessionID: string;
+  callID: string;
+  args?: unknown;
+}
+
+interface ToolAfterOutput {
+  title?: unknown;
+  output?: unknown;
+  metadata?: unknown;
+  [key: string]: unknown;
+}
+
+/** Free-tier failure signatures (enforcement: HTTP 429 / FreeUsageLimitError). */
+const RATE_LIMIT_RE = /429|FreeUsageLimitError|rate.?limit|quota/i;
+
+/** Failover state kept alongside the todo-4 SessionState, never inside it. */
+export interface FailoverState {
+  /** Free model this session most recently routed/stamped; null = none active. */
+  current: { providerID: string; modelID: string } | null;
+  /** One-shot guard: the paid-restore transition fires at most once. */
+  restored: boolean;
+  /** Paid restores performed this session; the harness asserts this stays 1. */
+  restores: number;
+  /** Staged notice text for the todo-9 toast (showToast is todo 9's job). */
+  notice: string | null;
+}
+
+/** SessionID -> failover state; entries are created only on a free route. */
+export const failoverStore = new Map<string, FailoverState>();
+
+function getFailover(sessionID: string): FailoverState {
+  let fo = failoverStore.get(sessionID);
+  if (!fo) {
+    fo = { current: null, restored: false, restores: 0, notice: null };
+    failoverStore.set(sessionID, fo);
+  }
+  return fo;
+}
+
+// Depth/breadth-bounded string harvest over the tool.execute.after output so a
+// 429 embedded in title/output/metadata at any nesting (circular included) is
+// found without throwing or hanging. input.args is NEVER read: hostile tool
+// args cannot steer failover.
+function harvestFailureText(output: unknown): string {
+  const parts: string[] = [];
+  let budget = 512;
+  let chars = 0;
+  const walk = (value: unknown, depth: number): void => {
+    if (budget <= 0 || chars > 100_000) return;
+    if (typeof value === "string") {
+      parts.push(value);
+      chars += value.length;
+      return;
+    }
+    if (depth <= 0 || value === null || typeof value !== "object") return;
+    budget -= 1;
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, depth - 1);
+      return;
+    }
+    for (const key of Object.keys(value)) walk((value as Record<string, unknown>)[key], depth - 1);
+  };
+  try {
+    walk(output, 3);
+  } catch {
+    // exotic getter/proxy: treat as having no matchable text
+  }
+  return parts.join("\n");
+}
+
+// chat.message wrapper: snapshot the pre-free model, let the untouched router
+// run, then apply the failover chain to whatever it picked (pickFree itself
+// has no failedIds knowledge, so a failed first candidate is re-computed here).
+async function withChatFailover(input: ChatMessageInput, output: ChatMessageOutput): Promise<void> {
+  const pre = {
+    providerID: output.message.model.providerID,
+    modelID: output.message.model.modelID,
+  };
+  await chatMessage(input, output);
+
+  const post = output.message.model;
+  const routed = post.providerID !== pre.providerID || post.modelID !== pre.modelID;
+  if (!routed) {
+    // Session is on its own model right now: drop any stale free marker
+    // WITHOUT creating store entries for sessions that never route free.
+    const stale = failoverStore.get(input.sessionID);
+    if (stale) stale.current = null;
+    return;
+  }
+
+  // A free pick was applied: capture the pre-free (paid) model for restore.
+  const state = getSession(input.sessionID);
+  if (state.priorModel === null) state.priorModel = { providerID: pre.providerID, modelID: pre.modelID };
+  const fo = getFailover(input.sessionID);
+
+  if (state.failedIds.length > 0) {
+    const next = nextCandidate(await fetchCatalog(), state.failedIds);
+    if (next) {
+      post.providerID = next.providerID;
+      post.modelID = next.modelID;
+      fo.current = { providerID: next.providerID, modelID: next.modelID };
+      return;
+    }
+    // Chain exhausted (cap = catalog length): present the restored paid model.
+    // The one-shot restore EVENT (count + notice) fires in toolExecuteAfter;
+    // this branch only keeps the message on the paid value.
+    const restore = state.priorModel ?? pre;
+    post.providerID = restore.providerID;
+    post.modelID = restore.modelID;
+    fo.current = null;
+    return;
+  }
+  fo.current = { providerID: post.providerID, modelID: post.modelID };
+}
+
+// tool.execute.before wrapper: a delegation stamp is also a free model in
+// flight, so it must honor failedIds too (otherwise a failed candidate would be
+// re-stamped). Non-delegation/mode-off calls are exact no-ops (no fetch).
+async function withToolFailover(input: ToolBeforeInput, output: ToolBeforeOutput): Promise<void> {
+  const args = output.args;
+  const isObj = args !== null && typeof args === "object";
+  const pre = isObj ? (args as { model?: ModelRef }).model : undefined;
+  const preSnap =
+    pre !== null && typeof pre === "object" ? { providerID: pre.providerID, modelID: pre.modelID } : undefined;
+
+  await toolExecuteBefore(input, output);
+  if (!isObj) return;
+
+  const after = (args as { model?: ModelRef }).model;
+  if (after === pre || after === undefined) return;
+
+  const state = getSession(input.sessionID);
+  const fo = getFailover(input.sessionID);
+
+  if (state.failedIds.length > 0) {
+    const next = nextCandidate(await fetchCatalog(), state.failedIds);
+    if (next) {
+      (args as { model?: ModelRef }).model = { providerID: next.providerID, modelID: next.modelID };
+      fo.current = { providerID: next.providerID, modelID: next.modelID };
+      return;
+    }
+    // Chain exhausted: undo the stamp - restore the caller's own paid model,
+    // or drop the key when there was none (or it was itself a free id).
+    try {
+      if (preSnap && detectFree([preSnap.modelID]).length === 0) {
+        (args as { model?: ModelRef }).model = { providerID: preSnap.providerID, modelID: preSnap.modelID };
+      } else {
+        delete (args as { model?: ModelRef }).model;
+      }
+    } catch {
+      // frozen args: best-effort, hooks never throw
+    }
+    fo.current = null;
+    return;
+  }
+  fo.current = { providerID: after.providerID, modelID: after.modelID };
+}
+
+// tool.execute.after: the 429/rate-limit signal itself. No-create lookups and
+// early returns keep ordinary tool traffic from ever touching the store.
+async function toolExecuteAfter(input: ToolAfterInput, output: ToolAfterOutput): Promise<void> {
+  try {
+    const sid =
+      input !== null && typeof input === "object" && typeof input.sessionID === "string"
+        ? input.sessionID
+        : "";
+    if (sid === "") return; // malformed input: no state touched
+    const fo = failoverStore.get(sid);
+    if (!fo || fo.current === null) return; // no free model in effect -> not "for the current free model"
+
+    const text = harvestFailureText(output);
+    if (!RATE_LIMIT_RE.test(text)) return; // non-429 failures must NOT fail over
+
+    const state = getSession(sid);
+    const failed = `${fo.current.providerID}/${fo.current.modelID}`;
+    const catalog = await fetchCatalog();
+    const cap = catalog.zen.length + catalog.go.length; // plan: cap = catalog length
+    if (state.failedIds.length < cap && state.failedIds.indexOf(failed) === -1) {
+      state.failedIds.push(failed);
+    }
+    if (nextCandidate(catalog, state.failedIds)) return; // room left: next route walks there
+
+    // Exhausted: paid-restore event fires exactly once per session.
+    if (!fo.restored) {
+      fo.restored = true;
+      fo.restores = 1;
+      const prior = state.priorModel;
+      fo.notice =
+        `free: rate-limited on ${failed} - free candidates exhausted for this session; ` +
+        `restored paid model ${prior ? `${prior.providerID}/${prior.modelID}` : "(session default)"}.`;
+    }
+    fo.current = null;
+  } catch {
+    // hooks never throw: malformed payloads degrade to a no-op
+  }
+}
+
 export default async (ctx: Parameters<Plugin>[0]) => ({
-  "chat.message": chatMessage,
+  "chat.message": withChatFailover,
   "command.execute.before": commandExecuteBefore,
-  "tool.execute.before": toolExecuteBefore,
+  "tool.execute.before": withToolFailover,
+  "tool.execute.after": toolExecuteAfter,
 });
 
 // __APPEND_HANDLERS_BELOW__
