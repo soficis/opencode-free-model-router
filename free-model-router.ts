@@ -152,9 +152,56 @@ async function commandExecuteBefore(
   output.parts.splice(0, output.parts.length, { type: "text", text });
 }
 
+interface ToolBeforeInput {
+  tool: string;
+  sessionID: string;
+  callID: string;
+}
+
+interface ToolBeforeOutput {
+  args: unknown;
+}
+
+const DELEGATION_TOOLS = new Set(["call_omo_agent", "delegate_task"]);
+
+async function toolExecuteBefore(
+  input: ToolBeforeInput,
+  output: ToolBeforeOutput,
+): Promise<void> {
+  // Core `task` has no `model` param (tool/task.ts#L43-L62, decode strips
+  // unknowns tool/tool.ts#L108-L130) so pinned subagents keep their models;
+  // unpinned ones inherit the rerouted parent (task.ts#L181-L184).
+  if (input.tool === "task") return; // log-skip: recognized, never inject
+  // Any other tool (core read/write/bash, OMO absent) is a strict no-op.
+  if (!DELEGATION_TOOLS.has(input.tool)) return;
+
+  // Session gate: only "/free on" reroutes delegation; off/auto pass through
+  // untouched, and an off session never fetches the catalog.
+  const state = getSession(input.sessionID);
+  if (state.mode !== "on") return;
+
+  const picked = pickFree(await fetchCatalog());
+  if (!picked) return;
+
+  // Stamp onto the EXISTING args object: session/tools.ts#L106-L110 discards
+  // the trigger return value, so rebinding output.args would never reach
+  // item.execute(args, ...) - only in-place property mutation propagates.
+  const args = output.args;
+  if (args === null || typeof args !== "object") return; // malformed: no-op, no throw
+  try {
+    (args as { model?: ModelRef }).model = {
+      providerID: picked.providerID,
+      modelID: picked.modelID,
+    };
+  } catch {
+    // frozen/non-extensible args: injection is best-effort, hooks never throw.
+  }
+}
+
 export default async (ctx: Parameters<Plugin>[0]) => ({
   "chat.message": chatMessage,
   "command.execute.before": commandExecuteBefore,
+  "tool.execute.before": toolExecuteBefore,
 });
 
 // __APPEND_HANDLERS_BELOW__
