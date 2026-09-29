@@ -85,8 +85,76 @@ async function chatMessage(input: ChatMessageInput, output: ChatMessageOutput): 
   for (const entry of rewritten) entry.part.text = entry.text;
 }
 
+interface CommandBeforeInput {
+  command: string;
+  sessionID: string;
+  arguments: string;
+}
+
+interface CommandBeforeOutput {
+  parts: Array<{ type?: unknown; text?: unknown; [key: string]: unknown }>;
+}
+
+const FREE_MODES = new Set(["on", "off", "auto"]);
+const FREE_ID_SEGMENT = /^[A-Za-z0-9._-]+$/;
+const FREE_USAGE = "/free on | /free off | /free auto | /free <provider/model-id>";
+
+function parseFreeArgument(
+  raw: string,
+): { mode: "on" | "off" | "auto"; pin: string | null } | null {
+  const arg = raw.trim();
+  if (arg === "") return null;
+  const lower = arg.toLowerCase();
+  if (FREE_MODES.has(lower)) return { mode: lower as "on" | "off" | "auto", pin: null };
+  const slash = arg.indexOf("/");
+  if (slash <= 0 || slash !== arg.lastIndexOf("/")) return null;
+  const provider = arg.slice(0, slash);
+  const modelID = arg.slice(slash + 1);
+  if (!FREE_ID_SEGMENT.test(provider) || !FREE_ID_SEGMENT.test(modelID)) return null;
+  if (FREE_MODES.has(provider.toLowerCase()) || FREE_MODES.has(modelID.toLowerCase())) return null;
+  return { mode: "on", pin: `${provider}/${modelID}` };
+}
+
+type SessionStateWithPin = SessionState & { preferredId?: string };
+
+async function commandExecuteBefore(
+  input: CommandBeforeInput,
+  output: CommandBeforeOutput,
+): Promise<void> {
+  if (input.command !== "free") return;
+  const state = getSession(input.sessionID);
+  const raw = typeof input.arguments === "string" ? input.arguments : "";
+  const parsed = parseFreeArgument(raw);
+  const shown = raw.trim().slice(0, 64);
+  let text: string;
+  if (parsed === null) {
+    text =
+      shown === ""
+        ? `free: no argument. Mode unchanged (${state.mode}). Usage: ${FREE_USAGE}.`
+        : `free: unknown argument "${shown}". Mode unchanged (${state.mode}). Usage: ${FREE_USAGE}.`;
+  } else if (parsed.mode === "off") {
+    state.mode = "off";
+    delete (state as SessionStateWithPin).preferredId;
+    text = "free mode: off for this session. Paid model routing restored.";
+  } else if (parsed.mode === "on") {
+    state.mode = "on";
+    if (parsed.pin !== null) (state as SessionStateWithPin).preferredId = parsed.pin;
+    text =
+      parsed.pin === null
+        ? "free mode: on for this session. Messages route to a free model when one is available."
+        : `free mode: on for this session. Preferred free model recorded: ${parsed.pin}.`;
+  } else {
+    state.mode = "auto";
+    text =
+      "free mode: auto for this session (reserved - no automatic routing; the free tag still routes; use /free on to route without a tag).";
+  }
+  // prompt.ts keeps its own reference to this array - replace contents in place.
+  output.parts.splice(0, output.parts.length, { type: "text", text });
+}
+
 export default async (ctx: Parameters<Plugin>[0]) => ({
   "chat.message": chatMessage,
+  "command.execute.before": commandExecuteBefore,
 });
 
 // __APPEND_HANDLERS_BELOW__
