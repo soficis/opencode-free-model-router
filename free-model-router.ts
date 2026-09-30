@@ -143,6 +143,7 @@ async function commandExecuteBefore(
       shown === ""
         ? `free: no argument. Mode unchanged (${state.mode}). Usage: ${FREE_USAGE}.`
         : `free: unknown argument "${shown}". Mode unchanged (${state.mode}). Usage: ${FREE_USAGE}.`;
+    if (shown === "") await notify(await catalogSummary());
   } else if (parsed.mode === "off") {
     state.mode = "off";
     delete (state as SessionStateWithPin).preferredId;
@@ -425,6 +426,8 @@ async function toolExecuteAfter(input: ToolAfterInput, output: ToolAfterOutput):
 
 export default async (ctx: Parameters<Plugin>[0]) => {
   pluginCtx = ctx as typeof pluginCtx;
+  // Startup toast: fire-and-forget so plugin init never waits on discovery.
+  void catalogSummary().then(notify, () => undefined);
   return {
     "chat.message": withChatFailover,
     "command.execute.before": commandExecuteBefore,
@@ -546,6 +549,21 @@ async function scopedCatalog(sessionID: string) {
   if ((await getPolicy(sessionID)).mode !== "zdr-only") return catalog;
   const safe = (id: string) => pickFree({ zen: [id], go: [] }, { zdrOnly: true }) !== null;
   return { zen: catalog.zen.filter(safe), go: catalog.go.filter(safe) };
+}
+
+// ---- catalog summary toast (todo 9) ----------------------------------------
+const SUMMARY_MAX = 200;
+
+/** One-line free-catalog summary (<= ~200 chars): per-provider counts + first ids. */
+async function catalogSummary(): Promise<string> {
+  try {
+    const c = await fetchCatalog();
+    const fmt = (label: string, ids: string[]) => `${label} ${ids.length}${ids.length ? ` (${ids.slice(0, 3).join(", ")}${ids.length > 3 ? ", ..." : ""})` : ""}`;
+    const text = `free models: ${fmt("opencode", c.zen)}; ${fmt("opencode-go", c.go)}`;
+    return text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX - 3)}...` : text;
+  } catch {
+    return "free models: catalog unavailable";
+  }
 }
 
 // __APPEND_HANDLERS_BELOW__
