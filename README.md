@@ -17,12 +17,19 @@ Free tiers are useful but temporary, IP-locked and rate limited, and some free m
 
 Pick one route. Install in **one** scope only: opencode loads every copy it finds, and two copies keep separate session state.
 
-### Copy the files
+### Standalone install
+
+Build the standalone bundle (which inlines `lib.ts` so opencode's plugin loader does not auto-discover helper utilities as independent plugins):
+
+```bash
+bun run build
+```
+
+Copy the bundle and command file:
 
 ```text
-free-model-router.ts  ->  ~/.config/opencode/plugins/free-model-router.ts
-lib.ts                ->  ~/.config/opencode/plugins/lib.ts
-command/free.md       ->  ~/.config/opencode/command/free.md
+dist/free-model-router.ts ->  ~/.config/opencode/plugins/free-model-router.ts
+command/free.md           ->  ~/.config/opencode/command/free.md
 ```
 
 (Use `<project>/.opencode/plugins` and `<project>/.opencode/command` instead for a project-only install.)

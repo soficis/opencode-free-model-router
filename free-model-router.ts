@@ -11,7 +11,7 @@ import { fetchCatalog, parseFreeTag, pickFree } from "./lib";
 import { type Plugin } from "@opencode-ai/plugin";
 
 /** Per-session routing state; default mode is "off" (tag-only routing). */
-export interface SessionState {
+interface SessionState {
   mode: "on" | "off" | "auto";
   /** Reserved for 429 failover: free-model ids already rejected this session. */
   failedIds: string[];
@@ -20,10 +20,10 @@ export interface SessionState {
 }
 
 /** Per-session store keyed by chat.message input.sessionID. */
-export const sessionStore = new Map<string, SessionState>();
+const sessionStore = new Map<string, SessionState>();
 
 /** Lazily create the default (mode "off") state for a session. */
-export function getSession(sessionID: string): SessionState {
+function getSession(sessionID: string): SessionState {
   let state = sessionStore.get(sessionID);
   if (!state) {
     state = { mode: "off", failedIds: [], priorModel: null };
@@ -243,7 +243,7 @@ interface ToolAfterOutput {
 const RATE_LIMIT_RE = /429|FreeUsageLimitError|rate.?limit|quota/i;
 
 /** Failover state kept alongside the todo-4 SessionState, never inside it. */
-export interface FailoverState {
+interface FailoverState {
   /** Free model this session most recently routed/stamped; null = none active. */
   current: { providerID: string; modelID: string } | null;
   /** One-shot guard: the paid-restore transition fires at most once. */
@@ -255,7 +255,7 @@ export interface FailoverState {
 }
 
 /** SessionID -> failover state; entries are created only on a free route. */
-export const failoverStore = new Map<string, FailoverState>();
+const failoverStore = new Map<string, FailoverState>();
 
 function getFailover(sessionID: string): FailoverState {
   let fo = failoverStore.get(sessionID);
@@ -510,7 +510,7 @@ function readPolicyFile(file: string): { policy: Policy; malformed: boolean } {
 }
 
 /** Resolve the project policy for a session (mtime-gated cache, never throws). */
-export async function getPolicy(sessionID: string): Promise<Policy> {
+async function getPolicy(sessionID: string): Promise<Policy> {
   try {
     const dir = await projectDirFor(sessionID);
     const file = join(dir, POLICY_FILE);
