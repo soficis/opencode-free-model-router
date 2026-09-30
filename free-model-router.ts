@@ -70,7 +70,13 @@ async function chatMessage(input: ChatMessageInput, output: ChatMessageOutput): 
   // Route only on an explicit @free tag or when this session is switched on.
   if (!tagged && state.mode !== "on") return;
 
-  const catalog = await fetchCatalog();
+  const policy = await getPolicy(input.sessionID);
+  if (policy.mode === "off") {
+    // Project opted out: the tag is still stripped, but nothing routes.
+    for (const entry of rewritten) entry.part.text = entry.text;
+    return;
+  }
+  const catalog = await scopedCatalog(input.sessionID);
   const opts: { preferredId?: string; role?: string } = {};
   if (requestedId !== null) opts.preferredId = requestedId;
   if (typeof input.agent === "string" && input.agent !== "") opts.role = input.agent;
@@ -123,6 +129,11 @@ async function commandExecuteBefore(
 ): Promise<void> {
   if (input.command !== "free") return;
   const state = getSession(input.sessionID);
+  if ((await getPolicy(input.sessionID)).mode === "off") {
+    output.parts.splice(0, output.parts.length, { type: "text", text: POLICY_OFF_TEXT });
+    await notify(POLICY_OFF_TEXT);
+    return;
+  }
   const raw = typeof input.arguments === "string" ? input.arguments : "";
   const parsed = parseFreeArgument(raw);
   const shown = raw.trim().slice(0, 64);
@@ -180,7 +191,8 @@ async function toolExecuteBefore(
   const state = getSession(input.sessionID);
   if (state.mode !== "on") return;
 
-  const picked = pickFree(await fetchCatalog());
+  if ((await getPolicy(input.sessionID)).mode === "off") return;
+  const picked = pickFree(await scopedCatalog(input.sessionID));
   if (!picked) return;
 
   // Stamp onto the EXISTING args object: session/tools.ts#L106-L110 discards
@@ -209,6 +221,8 @@ async function toolExecuteBefore(
 // starts a fresh chain (never persisted across sessions).
 
 import { detectFree, nextCandidate } from "./lib";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 interface ToolAfterInput {
   tool: string;
@@ -308,7 +322,7 @@ async function withChatFailover(input: ChatMessageInput, output: ChatMessageOutp
   const fo = getFailover(input.sessionID);
 
   if (state.failedIds.length > 0) {
-    const next = nextCandidate(await fetchCatalog(), state.failedIds);
+    const next = nextCandidate(await scopedCatalog(input.sessionID), state.failedIds);
     if (next) {
       post.providerID = next.providerID;
       post.modelID = next.modelID;
@@ -347,7 +361,7 @@ async function withToolFailover(input: ToolBeforeInput, output: ToolBeforeOutput
   const fo = getFailover(input.sessionID);
 
   if (state.failedIds.length > 0) {
-    const next = nextCandidate(await fetchCatalog(), state.failedIds);
+    const next = nextCandidate(await scopedCatalog(input.sessionID), state.failedIds);
     if (next) {
       (args as { model?: ModelRef }).model = { providerID: next.providerID, modelID: next.modelID };
       fo.current = { providerID: next.providerID, modelID: next.modelID };
@@ -387,7 +401,7 @@ async function toolExecuteAfter(input: ToolAfterInput, output: ToolAfterOutput):
 
     const state = getSession(sid);
     const failed = `${fo.current.providerID}/${fo.current.modelID}`;
-    const catalog = await fetchCatalog();
+    const catalog = await scopedCatalog(sid);
     const cap = catalog.zen.length + catalog.go.length; // plan: cap = catalog length
     if (state.failedIds.length < cap && state.failedIds.indexOf(failed) === -1) {
       state.failedIds.push(failed);
@@ -409,11 +423,129 @@ async function toolExecuteAfter(input: ToolAfterInput, output: ToolAfterOutput):
   }
 }
 
-export default async (ctx: Parameters<Plugin>[0]) => ({
-  "chat.message": withChatFailover,
-  "command.execute.before": commandExecuteBefore,
-  "tool.execute.before": withToolFailover,
-  "tool.execute.after": toolExecuteAfter,
-});
+export default async (ctx: Parameters<Plugin>[0]) => {
+  pluginCtx = ctx as typeof pluginCtx;
+  return {
+    "chat.message": withChatFailover,
+    "command.execute.before": commandExecuteBefore,
+    "tool.execute.before": withToolFailover,
+    "tool.execute.after": toolExecuteAfter,
+  };
+};
+
+// ---- per-project policy file (todo 8) --------------------------------------
+// <project>/.opencode/free-model-router.json = {"mode": "all"|"zdr-only"|"off"}.
+// A standalone dotfile (the main config rejects unknown keys with
+// ConfigInvalidError). Cached per session, re-validated by mtime on each use.
+
+type PolicyMode = "all" | "zdr-only" | "off";
+interface Policy {
+  mode: PolicyMode;
+}
+interface PolicyCacheEntry {
+  dir: string;
+  mtimeMs: number; // -1 = file absent
+  policy: Policy;
+}
+
+const POLICY_FILE = join(".opencode", "free-model-router.json");
+const POLICY_MODES = new Set<string>(["all", "zdr-only", "off"]);
+const POLICY_OFF_TEXT =
+  "free: routing is disabled for this project by .opencode/free-model-router.json (mode \"off\"). Nothing was changed.";
+const TRAINING_RISK_TEXT =
+  "free: free-tier models may use your prompts for training. Add .opencode/free-model-router.json with {\"mode\": \"zdr-only\"} to restrict routing to zero-data-retention models, or \"off\" to disable.";
+
+const policyCache = new Map<string, PolicyCacheEntry>();
+const sessionDirs = new Map<string, string>();
+const toastedSessions = new Set<string>();
+let pluginCtx: { client?: any; directory?: string } = {};
+
+/** Best-effort TUI toast; never throws, never blocks longer than 2s. */
+async function notify(message: string): Promise<void> {
+  try {
+    const show = pluginCtx.client?.tui?.showToast;
+    if (typeof show !== "function") return;
+    await Promise.race([
+      show.call(pluginCtx.client.tui, { body: { message, variant: "info" } }),
+      new Promise((resolve) => setTimeout(resolve, 2000)),
+    ]);
+  } catch {
+    // toast is advisory
+  }
+}
+
+async function projectDirFor(sessionID: string): Promise<string> {
+  const cached = sessionDirs.get(sessionID);
+  if (cached !== undefined) return cached;
+  let dir = typeof pluginCtx.directory === "string" ? pluginCtx.directory : process.cwd();
+  try {
+    const get = pluginCtx.client?.session?.get;
+    if (typeof get === "function") {
+      const res: any = await Promise.race([
+        get.call(pluginCtx.client.session, { path: { id: sessionID } }),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+      const d = res?.data?.directory;
+      if (typeof d === "string" && d !== "") dir = d;
+    }
+  } catch {
+    // fall back to the plugin's directory
+  }
+  sessionDirs.set(sessionID, dir);
+  return dir;
+}
+
+function readPolicyFile(file: string): { policy: Policy; malformed: boolean } {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    const mode = parsed !== null && typeof parsed === "object" ? (parsed as { mode?: unknown }).mode : undefined;
+    if (typeof mode === "string" && POLICY_MODES.has(mode)) return { policy: { mode: mode as PolicyMode }, malformed: false };
+  } catch {
+    // fall through: unreadable/invalid JSON
+  }
+  return { policy: { mode: "all" }, malformed: true };
+}
+
+/** Resolve the project policy for a session (mtime-gated cache, never throws). */
+export async function getPolicy(sessionID: string): Promise<Policy> {
+  try {
+    const dir = await projectDirFor(sessionID);
+    const file = join(dir, POLICY_FILE);
+    let mtimeMs = -1;
+    try {
+      mtimeMs = statSync(file).mtimeMs;
+    } catch {
+      // absent
+    }
+    const hit = policyCache.get(sessionID);
+    if (hit && hit.dir === dir && hit.mtimeMs === mtimeMs) return hit.policy;
+
+    let policy: Policy = { mode: "all" };
+    let warn: string | null = null;
+    if (mtimeMs === -1) {
+      if (!toastedSessions.has(sessionID)) warn = TRAINING_RISK_TEXT;
+    } else {
+      const r = readPolicyFile(file);
+      policy = r.policy;
+      if (r.malformed) warn = "free: .opencode/free-model-router.json is invalid (expected {\"mode\": \"all\"|\"zdr-only\"|\"off\"}); using mode \"all\".";
+    }
+    policyCache.set(sessionID, { dir, mtimeMs, policy });
+    if (warn !== null) {
+      toastedSessions.add(sessionID);
+      await notify(warn);
+    }
+    return policy;
+  } catch {
+    return { mode: "all" };
+  }
+}
+
+/** Catalog for this session: narrowed to ZDR-safe ids when the project says zdr-only. */
+async function scopedCatalog(sessionID: string) {
+  const catalog = await fetchCatalog();
+  if ((await getPolicy(sessionID)).mode !== "zdr-only") return catalog;
+  const safe = (id: string) => pickFree({ zen: [id], go: [] }, { zdrOnly: true }) !== null;
+  return { zen: catalog.zen.filter(safe), go: catalog.go.filter(safe) };
+}
 
 // __APPEND_HANDLERS_BELOW__
