@@ -7,8 +7,360 @@
 // through one copy is invisible to the other and both rewrites run (the second pass
 // sees already-stripped text). No runtime globalThis latch here - single-scope
 // install is the enforced contract.
-import { fetchCatalog, parseFreeTag, pickFree } from "./lib";
+//
+// ONE-EXPORT INVARIANT: opencode loads every *.ts it finds as a plugin and aborts
+// the whole load if the default export is not a function ("Plugin export is not a
+// function"). This file must therefore stay self-contained and keep exactly one
+// export - the default plugin function.
 import { type Plugin } from "@opencode-ai/plugin";
+import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+// ---- catalog discovery + pure routing (file-private, zero exports) ---------
+// The ONLY network/process I/O in this plugin lives inside fetchCatalog().
+// Callers never set reasoningEffort here (never a `max` default on muse-spark
+// free ids - leave it unset upstream).
+// ---------------------------------------------------------------------------
+
+interface FreeCatalog {
+  zen: string[];
+  go: string[];
+}
+
+interface PickOptions {
+  preferredId?: string;
+  preferIds?: string[] | null;
+  role?: string;
+  zdrOnly?: boolean;
+}
+
+interface ModelPick {
+  providerID: string;
+  modelID: string;
+}
+
+const ZEN_PROVIDER = "opencode";
+const GO_PROVIDER = "opencode-go";
+const ZEN_MODELS_URL = "https://opencode.ai/zen/v1/models";
+const CATALOG_TTL_MS = 60 * 60 * 1000; // 1h cache - idle refresh stays stale-only
+const SOURCE_TIMEOUT_MS = 10_000; // every source is bounded; failure degrades to pinned
+const MODELS_BIN_ENV = "OPENCODE_FREE_ROUTER_MODELS_BIN";
+const DEFAULT_MODELS_BIN = "opencode";
+
+// Unsuffixed ids that are free despite lacking the -free suffix (todo 2 recon).
+const FREE_ALLOWLIST: readonly string[] = ["big-pickle"];
+
+// ZDR-safe = space-bunny-free + longcat-2.5-preview-free ONLY, both providers (todo 2).
+const ZDR_SAFE_IDS: readonly string[] = ["space-bunny-free", "longcat-2.5-preview-free"];
+const ZDR_PREFERRED_ORDER: readonly string[] = ["space-bunny-free", "longcat-2.5-preview-free"];
+
+// Role -> default free model id; unknown/absent role falls back to "general".
+const ROLE_DEFAULT_IDS: Record<string, string> = {
+  general: "mimo-v2.6-flash-free",
+  code: "deepseek-v4-flash-free",
+  plan: "deepseek-v4-flash-free",
+  orchestration: "deepseek-v4-flash-free",
+  subagent: "deepseek-v4-flash-free",
+  research: "muse-spark-1.3-contributor-free",
+  writing: "muse-spark-1.3-contributor-free",
+  title: "mimo-v2.6-flash-free",
+  compact: "deepseek-v4-flash-free",
+  summarize: "deepseek-v4-flash-free",
+};
+
+// Pinned fallback locked by todo 2 recon 2026-09-29: returned (never thrown) when a
+// source fails, times out, or returns a non-2xx.
+const PINNED: FreeCatalog = {
+  zen: [
+    "jev-1.13-free",
+    "deepseek-v4-flash-free",
+    "muse-spark-1.3-contributor-free",
+    "muse-spark-1.2-contributor-free",
+    "mimo-v2.6-flash-free",
+    "space-bunny-free",
+    "longcat-2.5-preview-free",
+    "mimo-v2.5-free",
+    "ling-3.0-flash-fin-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "big-pickle",
+  ],
+  go: ["space-bunny-free", "longcat-2.5-preview-free"],
+};
+
+interface CatalogCache {
+  value: FreeCatalog;
+  at: number;
+}
+
+let cache: CatalogCache | null = null;
+let inflight: Promise<FreeCatalog> | null = null;
+
+function pinnedClone(): FreeCatalog {
+  return { zen: [...PINNED.zen], go: [...PINNED.go] };
+}
+
+// Rejects after ms regardless of whether the underlying promise ever settles, so a
+// signal-ignoring or hung fetch cannot block the caller past the bound.
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("source timeout")), ms);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+function extractZenIds(body: unknown): string[] {
+  const ids: string[] = [];
+  const collect = (list: unknown): void => {
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      if (typeof item === "string") {
+        ids.push(item);
+        continue;
+      }
+      if (item && typeof item === "object") {
+        const rec = item as Record<string, unknown>;
+        const id = rec["id"] ?? rec["model"] ?? rec["name"];
+        if (typeof id === "string") ids.push(id);
+      }
+    }
+  };
+  if (Array.isArray(body)) {
+    collect(body);
+    return ids;
+  }
+  if (body && typeof body === "object") {
+    const rec = body as Record<string, unknown>;
+    collect(rec["data"] ?? rec["models"] ?? rec["list"]);
+  }
+  return ids;
+}
+
+function parseGoModels(stdout: string): string[] {
+  const ids: string[] = [];
+  for (const raw of stdout.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const token = line.split(/\s+/)[0] ?? "";
+    const slash = token.indexOf("/");
+    if (slash <= 0) continue;
+    if (token.slice(0, slash) !== GO_PROVIDER) continue;
+    const id = token.slice(slash + 1);
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+function toEntries(catalog: FreeCatalog | null | undefined): ModelPick[] {
+  if (!catalog || typeof catalog !== "object") return [];
+  const entries: ModelPick[] = [];
+  const push = (list: unknown, providerID: string): void => {
+    if (!Array.isArray(list)) return;
+    for (const id of list) {
+      if (typeof id === "string") entries.push({ providerID, modelID: id });
+    }
+  };
+  push(catalog.zen, ZEN_PROVIDER);
+  push(catalog.go, GO_PROVIDER);
+  return entries;
+}
+
+function isZdrSafe(modelID: string): boolean {
+  return ZDR_SAFE_IDS.includes(modelID);
+}
+
+// Live discovery. Zen = unauthenticated GET of the models endpoint; Go = `opencode models`
+// CLI parsing (worker-verified source, todo 2). Module-state TTL cache (>= 1h) plus in-flight
+// dedupe; any source failure returns the pinned fallback for that side, never a throw.
+async function fetchCatalog(): Promise<FreeCatalog> {
+  if (cache && Date.now() - cache.at < CATALOG_TTL_MS) return cache.value;
+  if (inflight) return inflight;
+  inflight = (async (): Promise<FreeCatalog> => {
+    let zen: string[] | null = null;
+    let go: string[] | null = null;
+
+    // The only HTTP call in this module.
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), SOURCE_TIMEOUT_MS);
+      try {
+        const res = await withTimeout(fetch(ZEN_MODELS_URL, { signal: controller.signal }), SOURCE_TIMEOUT_MS);
+        if (res.ok) {
+          const body: unknown = await withTimeout(res.json(), SOURCE_TIMEOUT_MS);
+          zen = detectFree(extractZenIds(body));
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      zen = null;
+    }
+
+    // The only process call in this module (opencode models CLI).
+    try {
+      const envBin = process.env[MODELS_BIN_ENV];
+      const bin = envBin && envBin.length > 0 ? envBin : DEFAULT_MODELS_BIN;
+      const { execFile } = await import("node:child_process");
+      const isWin = process.platform === "win32";
+      const command = isWin ? process.env["ComSpec"] ?? "cmd.exe" : bin;
+      const args = isWin ? ["/c", bin, "models"] : ["models"];
+      const stdout = await withTimeout(
+        new Promise<string>((resolve, reject) => {
+          execFile(
+            command,
+            args,
+            {
+              timeout: SOURCE_TIMEOUT_MS,
+              maxBuffer: 4 * 1024 * 1024,
+              windowsHide: true,
+              encoding: "utf8",
+            },
+            (err, out) => {
+              if (err) reject(err);
+              else resolve(String(out));
+            },
+          );
+        }),
+        SOURCE_TIMEOUT_MS,
+      );
+      go = detectFree(parseGoModels(stdout));
+    } catch {
+      go = null;
+    }
+
+    const value: FreeCatalog = {
+      zen: zen && zen.length > 0 ? zen : pinnedClone().zen,
+      go: go && go.length > 0 ? go : pinnedClone().go,
+    };
+    cache = { value, at: Date.now() };
+    return value;
+  })().catch((): FreeCatalog => {
+    // Absolute guard: degrade to pinned (and cache it) instead of ever rejecting.
+    const value = pinnedClone();
+    cache = { value, at: Date.now() };
+    return value;
+  });
+  try {
+    return await inflight;
+  } finally {
+    inflight = null;
+  }
+}
+
+// Suffix -free match plus the pinned unsuffixed allowlist (big-pickle).
+function detectFree(ids: string[]): string[] {
+  if (!Array.isArray(ids)) return [];
+  const free: string[] = [];
+  for (const id of ids) {
+    if (typeof id !== "string") continue;
+    if (id.endsWith("-free") || FREE_ALLOWLIST.includes(id)) free.push(id);
+  }
+  return free;
+}
+
+// Resolves one id spec ("id" or "provider/id") against the allowed entries.
+// Returns null for an id the catalog does not carry, so callers can skip it.
+function matchSpec(allowed: ModelPick[], spec: string): ModelPick | null {
+  const slash = spec.indexOf("/");
+  const provider = slash > 0 ? spec.slice(0, slash) : "";
+  const id = slash > 0 ? spec.slice(slash + 1) : spec;
+  return (
+    allowed.find((e) => e.modelID === id && (provider.length === 0 || e.providerID === provider)) ?? null
+  );
+}
+
+// preferredId (bare or "provider/id") wins; then the user's configured prefer list
+// (unknown ids skipped); else role-mapped default; zdrOnly restricts to
+// the ZDR-safe set. Returns null - never throws - on empty/malformed catalogs.
+function pickFree(catalog: FreeCatalog | null | undefined, opts: PickOptions = {}): ModelPick | null {
+  const entries = toEntries(catalog);
+  if (entries.length === 0) return null;
+  const zdrOnly = opts !== null && opts !== undefined && opts.zdrOnly === true;
+  const allowed = zdrOnly ? entries.filter((e) => isZdrSafe(e.modelID)) : entries;
+  if (allowed.length === 0) return null;
+
+  const options = opts ?? {};
+  const preferred = typeof options.preferredId === "string" ? options.preferredId : "";
+  if (preferred.length > 0) {
+    const hit = matchSpec(allowed, preferred);
+    if (hit) return hit;
+  }
+
+  const preferIds = options.preferIds;
+  if (Array.isArray(preferIds)) {
+    for (const spec of preferIds) {
+      if (typeof spec !== "string" || spec === "") continue;
+      const hit = matchSpec(allowed, spec);
+      if (hit) return hit;
+    }
+  }
+
+  const role = typeof options.role === "string" && options.role.length > 0 ? options.role : undefined;
+  const candidates: (string | undefined)[] = [];
+  if (role && ROLE_DEFAULT_IDS[role]) candidates.push(ROLE_DEFAULT_IDS[role]);
+  candidates.push(ROLE_DEFAULT_IDS["general"]);
+  for (const id of candidates) {
+    if (!id) continue;
+    const hit = allowed.find((e) => e.modelID === id);
+    if (hit) return hit;
+  }
+
+  if (zdrOnly) {
+    for (const id of ZDR_PREFERRED_ORDER) {
+      const hit = allowed.find((e) => e.modelID === id);
+      if (hit) return hit;
+    }
+  }
+  return allowed[0] ?? null;
+}
+
+// Splits "@free" (plus optional id token, bare or provider-qualified) off the text. A token
+// is only consumed as requestedId when it is a free id (detectFree), so ordinary words that
+// merely follow the tag survive in clean untouched.
+function parseFreeTag(text: string): { clean: string; requestedId: string | null } {
+  if (typeof text !== "string" || text.length === 0) return { clean: "", requestedId: null };
+  let requestedId: string | null = null;
+  const clean = text
+    .replace(/@free(?![A-Za-z0-9_-])(?:\s+|\/)([A-Za-z0-9][A-Za-z0-9._/-]*)/g, (match, id?: string) => {
+      if (!id || requestedId !== null) return match;
+      const norm = id.replace(/[./_-]+$/, "");
+      if (!norm) return match;
+      const idPart = norm.indexOf("/") >= 0 ? norm.slice(norm.indexOf("/") + 1) : norm;
+      if (detectFree([idPart]).length === 0) return match;
+      requestedId = norm;
+      return "";
+    })
+    .replace(/@free(?![A-Za-z0-9_-])[.,;:!?]*/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+  return { clean, requestedId };
+}
+
+// First catalog entry (zen order, then go) whose id is not in failedIds - matched bare or
+// provider-qualified. Null when exhausted or catalog empty.
+function nextCandidate(catalog: FreeCatalog | null | undefined, failedIds: string[]): ModelPick | null {
+  const entries = toEntries(catalog);
+  if (entries.length === 0) return null;
+  const failed = new Set(Array.isArray(failedIds) ? failedIds.filter((f) => typeof f === "string") : []);
+  for (const entry of entries) {
+    if (failed.has(entry.modelID)) continue;
+    if (failed.has(`${entry.providerID}/${entry.modelID}`)) continue;
+    return entry;
+  }
+  return null;
+}
+
+// ---- end inlined lib block -------------------------------------------------
 
 /** Per-session routing state; default mode is "off" (tag-only routing). */
 interface SessionState {
@@ -27,6 +379,43 @@ function getSession(sessionID: string): SessionState {
   let state = sessionStore.get(sessionID);
   if (!state) {
     state = { mode: "off", failedIds: [], priorModel: null };
+    sessionStore.set(sessionID, state);
+  }
+  return state;
+}
+
+// Subagent sessions carry parentID (session.get): on FIRST touch inherit ONLY the
+// nearest ancestor's mode - failedIds, failoverStore and priorModel stay
+// per-session. Creating the store entry below is the cache (one walk per session);
+// no ancestor state -> "off". seen-set cycle guard, depth <= 16, one shared 2s
+// deadline for the whole walk, and the function never rejects (hooks contract).
+async function resolveSession(sessionID: string): Promise<SessionState> {
+  const existing = sessionStore.get(sessionID);
+  if (existing !== undefined) return existing;
+  const deadlineAt = Date.now() + 2000;
+  let mode: SessionState["mode"] = "off";
+  try {
+    const seen = new Set<string>([sessionID]);
+    let current = sessionID;
+    for (let depth = 0; depth < 16; depth++) {
+      const meta = await sessionMeta(current, deadlineAt);
+      const pid = meta.parentID;
+      if (pid === null || seen.has(pid)) break;
+      seen.add(pid);
+      const ancestor = sessionStore.get(pid);
+      if (ancestor !== undefined) {
+        mode = ancestor.mode;
+        break;
+      }
+      current = pid;
+      if (Date.now() >= deadlineAt) break;
+    }
+  } catch {
+    // already degraded to the default mode
+  }
+  let state = sessionStore.get(sessionID);
+  if (state === undefined) {
+    state = { mode, failedIds: [], priorModel: null };
     sessionStore.set(sessionID, state);
   }
   return state;
@@ -51,7 +440,7 @@ interface ChatMessageOutput {
 }
 
 async function chatMessage(input: ChatMessageInput, output: ChatMessageOutput): Promise<void> {
-  const state = getSession(input.sessionID);
+  const state = await resolveSession(input.sessionID);
 
   // Pass 1: strip @free from text parts only. Non-text parts are never touched.
   let tagged = false;
@@ -77,9 +466,15 @@ async function chatMessage(input: ChatMessageInput, output: ChatMessageOutput): 
     return;
   }
   const catalog = await scopedCatalog(input.sessionID);
-  const opts: { preferredId?: string; role?: string } = {};
+  const opts: { preferredId?: string; preferIds?: string[]; role?: string } = {};
   if (requestedId !== null) opts.preferredId = requestedId;
-  if (typeof input.agent === "string" && input.agent !== "") opts.role = input.agent;
+  const role = typeof input.agent === "string" && input.agent !== "" ? input.agent : "general";
+  opts.role = role;
+  // Exactly one tier is chosen, never concatenated: a named role beats the
+  // blanket default, and the built-in default is the last resort.
+  const preferIds =
+    policy.preferByRole[role] ?? policy.preferDefault ?? [ROLE_DEFAULT_IDS[role] ?? ROLE_DEFAULT_IDS["general"]];
+  opts.preferIds = preferIds;
   const picked = pickFree(catalog, opts);
 
   if (picked) {
@@ -128,7 +523,7 @@ async function commandExecuteBefore(
   output: CommandBeforeOutput,
 ): Promise<void> {
   if (input.command !== "free") return;
-  const state = getSession(input.sessionID);
+  const state = await resolveSession(input.sessionID);
   if ((await getPolicy(input.sessionID)).mode === "off") {
     output.parts.splice(0, output.parts.length, { type: "text", text: POLICY_OFF_TEXT });
     await notify(POLICY_OFF_TEXT);
@@ -189,7 +584,7 @@ async function toolExecuteBefore(
 
   // Session gate: only "/free on" reroutes delegation; off/auto pass through
   // untouched, and an off session never fetches the catalog.
-  const state = getSession(input.sessionID);
+  const state = await resolveSession(input.sessionID);
   if (state.mode !== "on") return;
 
   if ((await getPolicy(input.sessionID)).mode === "off") return;
@@ -217,13 +612,9 @@ async function toolExecuteBefore(
 // model records it in state.failedIds; every later route walks via
 // nextCandidate(catalog, failedIds) - cap = catalog length, never a retry
 // loop. Exhaustion restores the session's prior paid model exactly once and
-// stages a notice for the todo-9 toast (this todo never calls showToast).
+// shows a notice toast in that same turn (the README-promised notice).
 // failedIds live only in this process's session store: a fresh sessionID
 // starts a fresh chain (never persisted across sessions).
-
-import { detectFree, nextCandidate } from "./lib";
-import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
 
 interface ToolAfterInput {
   tool: string;
@@ -250,7 +641,7 @@ interface FailoverState {
   restored: boolean;
   /** Paid restores performed this session; the harness asserts this stays 1. */
   restores: number;
-  /** Staged notice text for the todo-9 toast (showToast is todo 9's job). */
+  /** Notice text shown via notify() on the paid-restore turn; kept for assertions. */
   notice: string | null;
 }
 
@@ -409,7 +800,8 @@ async function toolExecuteAfter(input: ToolAfterInput, output: ToolAfterOutput):
     }
     if (nextCandidate(catalog, state.failedIds)) return; // room left: next route walks there
 
-    // Exhausted: paid-restore event fires exactly once per session.
+    // Exhausted: paid-restore event fires exactly once per session, and the
+    // notice is shown to the user right here (README: "a notice is produced").
     if (!fo.restored) {
       fo.restored = true;
       fo.restores = 1;
@@ -417,6 +809,7 @@ async function toolExecuteAfter(input: ToolAfterInput, output: ToolAfterOutput):
       fo.notice =
         `free: rate-limited on ${failed} - free candidates exhausted for this session; ` +
         `restored paid model ${prior ? `${prior.providerID}/${prior.modelID}` : "(session default)"}.`;
+      await notify(fo.notice);
     }
     fo.current = null;
   } catch {
@@ -442,24 +835,131 @@ export default async (ctx: Parameters<Plugin>[0]) => {
 // ConfigInvalidError). Cached per session, re-validated by mtime on each use.
 
 type PolicyMode = "all" | "zdr-only" | "off";
+type RolePreferenceMap = Record<string, string[]>;
 interface Policy {
   mode: PolicyMode;
+  preferByRole: RolePreferenceMap; // named roles only; `default` / `*` excluded
+  preferDefault: string[] | null; // merged catch-all, or null to use the built-in
 }
 interface PolicyCacheEntry {
   dir: string;
   mtimeMs: number; // -1 = file absent
+  globalPath: string;
+  globalMtimeMs: number; // -1 = global file absent
   policy: Policy;
 }
 
 const POLICY_FILE = join(".opencode", "free-model-router.json");
+const GLOBAL_CONFIG_ENV = "OPENCODE_FREE_ROUTER_GLOBAL_CONFIG";
 const POLICY_MODES = new Set<string>(["all", "zdr-only", "off"]);
 const POLICY_OFF_TEXT =
   "free: routing is disabled for this project by .opencode/free-model-router.json (mode \"off\"). Nothing was changed.";
 const TRAINING_RISK_TEXT =
   "free: free-tier models may use your prompts for training. Add .opencode/free-model-router.json with {\"mode\": \"zdr-only\"} to restrict routing to zero-data-retention models, or \"off\" to disable.";
 
+function emptyPolicy(): Policy {
+  return { mode: "all", preferByRole: {}, preferDefault: null };
+}
+
+/**
+ * Resolved at CALL time, never in a module-level const: tests install the
+ * OPENCODE_FREE_ROUTER_GLOBAL_CONFIG override after this module is imported,
+ * and a frozen const would silently ignore it.
+ */
+function globalConfigPath(): string {
+  const override = process.env[GLOBAL_CONFIG_ENV];
+  if (typeof override === "string" && override !== "") return override;
+  return join(homedir(), ".config", "opencode", "free-model-router.json");
+}
+
+function toIdList(raw: unknown): { ids: string[]; invalid: boolean } {
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    return { ids: trimmed === "" ? [] : [trimmed], invalid: false };
+  }
+  if (Array.isArray(raw)) {
+    const ids: string[] = [];
+    let invalid = false;
+    for (const item of raw) {
+      if (typeof item !== "string") {
+        invalid = true;
+        continue;
+      }
+      const trimmed = item.trim();
+      if (trimmed !== "") ids.push(trimmed);
+    }
+    return { ids, invalid };
+  }
+  return { ids: [], invalid: true };
+}
+
+/** `prefer` accepts a string, an ordered list, or a per-role object; `default`/`*` is the catch-all. */
+function parsePrefer(raw: unknown): { byRole: RolePreferenceMap; fallback: string[] | null; invalid: boolean } {
+  if (raw === undefined) return { byRole: {}, fallback: null, invalid: false };
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    const flat = toIdList(raw);
+    return { byRole: {}, fallback: flat.ids.length === 0 ? null : flat.ids, invalid: flat.invalid };
+  }
+  const byRole: RolePreferenceMap = {};
+  let fallback: string[] | null = null;
+  let invalid = false;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const parsed = toIdList(value);
+    if (parsed.invalid) invalid = true;
+    if (parsed.ids.length === 0) continue;
+    if (key === "default" || key === "*") fallback = parsed.ids;
+    else byRole[key] = parsed.ids;
+  }
+  return { byRole, fallback, invalid };
+}
+
+interface PolicyFileRead {
+  policy: Policy;
+  malformed: boolean;
+  modeInvalid: boolean;
+  preferInvalid: boolean;
+  unknownRoles: string[];
+}
+
+function readPolicyFile(file: string): PolicyFileRead {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return { policy: emptyPolicy(), malformed: true, modeInvalid: false, preferInvalid: false, unknownRoles: [] };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { policy: emptyPolicy(), malformed: true, modeInvalid: false, preferInvalid: false, unknownRoles: [] };
+  }
+  const obj = parsed as { mode?: unknown; prefer?: unknown };
+  const mode = typeof obj.mode === "string" && POLICY_MODES.has(obj.mode) ? (obj.mode as PolicyMode) : "all";
+  const prefer = parsePrefer(obj.prefer);
+  const unknownRoles = Object.keys(prefer.byRole).filter((role) => !(role in ROLE_DEFAULT_IDS));
+  return {
+    policy: { mode, preferByRole: prefer.byRole, preferDefault: prefer.fallback },
+    malformed: false,
+    modeInvalid: obj.mode !== undefined && mode === "all",
+    preferInvalid: prefer.invalid,
+    unknownRoles,
+  };
+}
+
+function policyWarnings(read: PolicyFileRead, label: string): string[] {
+  const warns: string[] = [];
+  if (read.malformed || read.modeInvalid) {
+    warns.push(`free: ${label} is invalid (expected {"mode": "all"|"zdr-only"|"off"}); using mode "all".`);
+  }
+  if (read.preferInvalid) {
+    warns.push(`free: "prefer" in ${label} is not a string, a list of strings, or a per-role object; ignoring it.`);
+  }
+  if (read.unknownRoles.length > 0) {
+    warns.push(`free: unknown role(s) in "prefer" in ${label} ignored: ${read.unknownRoles.join(", ")}.`);
+  }
+  return warns;
+}
+
 const policyCache = new Map<string, PolicyCacheEntry>();
-const sessionDirs = new Map<string, string>();
+const sessionMetaCache = new Map<string, { directory: string; parentID: string | null }>();
 const toastedSessions = new Set<string>();
 let pluginCtx: { client?: any; directory?: string } = {};
 
@@ -477,69 +977,94 @@ async function notify(message: string): Promise<void> {
   }
 }
 
-async function projectDirFor(sessionID: string): Promise<string> {
-  const cached = sessionDirs.get(sessionID);
+// One session.get per session (cached) yields BOTH the project directory (policy)
+// and parentID (inheritance walk). The deadline bounds the API call so a hung
+// client cannot stall a hook; on timeout/error we degrade to the plugin directory
+// with no parent - never reject, cache the fallback so we do not retry forever.
+async function sessionMeta(sessionID: string, deadlineAt: number): Promise<{ directory: string; parentID: string | null }> {
+  const cached = sessionMetaCache.get(sessionID);
   if (cached !== undefined) return cached;
   let dir = typeof pluginCtx.directory === "string" ? pluginCtx.directory : process.cwd();
+  let parentID: string | null = null;
   try {
     const get = pluginCtx.client?.session?.get;
     if (typeof get === "function") {
+      const budget = Math.max(0, deadlineAt - Date.now());
       const res: any = await Promise.race([
         get.call(pluginCtx.client.session, { path: { id: sessionID } }),
-        new Promise((resolve) => setTimeout(resolve, 2000)),
+        new Promise((resolve) => setTimeout(resolve, budget)),
       ]);
       const d = res?.data?.directory;
       if (typeof d === "string" && d !== "") dir = d;
+      const p = res?.data?.parentID;
+      if (typeof p === "string" && p !== "") parentID = p;
     }
   } catch {
-    // fall back to the plugin's directory
+    // fall back to the plugin's directory, no parent
   }
-  sessionDirs.set(sessionID, dir);
-  return dir;
+  const meta = { directory: dir, parentID };
+  sessionMetaCache.set(sessionID, meta);
+  return meta;
 }
 
-function readPolicyFile(file: string): { policy: Policy; malformed: boolean } {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-    const mode = parsed !== null && typeof parsed === "object" ? (parsed as { mode?: unknown }).mode : undefined;
-    if (typeof mode === "string" && POLICY_MODES.has(mode)) return { policy: { mode: mode as PolicyMode }, malformed: false };
-  } catch {
-    // fall through: unreadable/invalid JSON
-  }
-  return { policy: { mode: "all" }, malformed: true };
-}
-
-/** Resolve the project policy for a session (mtime-gated cache, never throws). */
+/** Resolve the merged policy for a session (mtime-gated cache, never throws). */
 async function getPolicy(sessionID: string): Promise<Policy> {
   try {
-    const dir = await projectDirFor(sessionID);
+    const dir = (await sessionMeta(sessionID, Date.now() + 2000)).directory;
     const file = join(dir, POLICY_FILE);
+    const gFile = globalConfigPath();
     let mtimeMs = -1;
+    let gMtimeMs = -1;
     try {
       mtimeMs = statSync(file).mtimeMs;
     } catch {
       // absent
     }
-    const hit = policyCache.get(sessionID);
-    if (hit && hit.dir === dir && hit.mtimeMs === mtimeMs) return hit.policy;
-
-    let policy: Policy = { mode: "all" };
-    let warn: string | null = null;
-    if (mtimeMs === -1) {
-      if (!toastedSessions.has(sessionID)) warn = TRAINING_RISK_TEXT;
-    } else {
-      const r = readPolicyFile(file);
-      policy = r.policy;
-      if (r.malformed) warn = "free: .opencode/free-model-router.json is invalid (expected {\"mode\": \"all\"|\"zdr-only\"|\"off\"}); using mode \"all\".";
+    try {
+      gMtimeMs = statSync(gFile).mtimeMs;
+    } catch {
+      // absent
     }
-    policyCache.set(sessionID, { dir, mtimeMs, policy });
-    if (warn !== null) {
+    const hit = policyCache.get(sessionID);
+    if (
+      hit &&
+      hit.dir === dir &&
+      hit.mtimeMs === mtimeMs &&
+      hit.globalPath === gFile &&
+      hit.globalMtimeMs === gMtimeMs
+    ) {
+      return hit.policy;
+    }
+    const warns: string[] = [];
+    let policy = emptyPolicy();
+    if (mtimeMs === -1) {
+      if (!toastedSessions.has(sessionID)) warns.push(TRAINING_RISK_TEXT);
+    } else {
+      const read = readPolicyFile(file);
+      policy = read.policy;
+      warns.push(...policyWarnings(read, POLICY_FILE));
+    }
+
+    // The global file supplies preferences only: `mode` stays project-scoped so a
+    // per-user file can never opt a project out of routing.
+    if (gMtimeMs !== -1) {
+      const global = readPolicyFile(gFile);
+      policy = {
+        mode: policy.mode,
+        preferByRole: { ...global.policy.preferByRole, ...policy.preferByRole },
+        preferDefault: policy.preferDefault ?? global.policy.preferDefault,
+      };
+      warns.push(...policyWarnings(global, "the global free-model-router.json"));
+    }
+
+    policyCache.set(sessionID, { dir, mtimeMs, globalPath: gFile, globalMtimeMs: gMtimeMs, policy });
+    if (warns.length > 0) {
       toastedSessions.add(sessionID);
-      await notify(warn);
+      for (const warn of warns) await notify(warn);
     }
     return policy;
   } catch {
-    return { mode: "all" };
+    return emptyPolicy();
   }
 }
 
