@@ -348,6 +348,16 @@ function candidateList(catalog: FreeCatalog | null | undefined, opts: ListOption
     resolved.push({ pick: hit, source: item.source });
   }
 
+  // Deliberately not in the spec's candidate list: without this final tier the chain is one
+  // entry long when nothing is configured, so a single 429 would strand the session on the
+  // paid model instead of walking the rest of the catalog.
+  for (const entry of entries) {
+    const key = `${entry.providerID}/${entry.modelID}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    resolved.push({ pick: entry, source: "built-in" });
+  }
+
   let chain = resolved;
   if (zdrOnly) {
     chain = resolved.filter((c) => isZdrSafe(c.pick.modelID));
@@ -367,18 +377,7 @@ function candidateList(catalog: FreeCatalog | null | undefined, opts: ListOption
       }
     }
   }
-  if (chain.length === 0) return firstCatalogEntry(entries, zdrOnly, seen);
   return chain;
-}
-
-// Last rung of the degradation ladder: without it a stale prefer list would send the
-// user straight to a paid model instead of to any free one.
-function firstCatalogEntry(entries: ModelPick[], zdrOnly: boolean, seen: Set<string>): Candidate[] {
-  const pool = zdrOnly ? entries.filter((e) => isZdrSafe(e.modelID)) : entries;
-  const first = pool[0];
-  if (first === undefined) return [];
-  if (seen.has(`${first.providerID}/${first.modelID}`)) return [];
-  return [{ pick: first, source: "built-in" }];
 }
 
 // First candidate that has not already failed this session, matched bare or
@@ -416,18 +415,25 @@ function parseFreeTag(text: string): { clean: string; requestedId: string | null
   return { clean, requestedId };
 }
 
-// First catalog entry (zen order, then go) whose id is not in failedIds - matched bare or
-// provider-qualified. Null when exhausted or catalog empty.
-function nextCandidate(catalog: FreeCatalog | null | undefined, failedIds: string[]): ModelPick | null {
-  const entries = toEntries(catalog);
-  if (entries.length === 0) return null;
-  const failed = new Set(Array.isArray(failedIds) ? failedIds.filter((f) => typeof f === "string") : []);
-  for (const entry of entries) {
-    if (failed.has(entry.modelID)) continue;
-    if (failed.has(`${entry.providerID}/${entry.modelID}`)) continue;
-    return entry;
-  }
-  return null;
+// The ONE shape every 429 failover site uses: rebuild the same ordered chain the picker
+// used, then take the first entry this session has not already failed. Sharing it is the
+// point - a preference must not be honoured on the first turn and ignored on the next.
+async function nextInChain(
+  sessionID: string,
+  role: string,
+  pin: string | null,
+  failedIds: string[],
+): Promise<Candidate | null> {
+  const policy = await getPolicy(sessionID);
+  if (policy.mode === "off") return null;
+  const candidates = candidateList(await fetchCatalog(), {
+    sessionID,
+    pin,
+    role,
+    zdrOnly: policy.mode === "zdr-only",
+    policy,
+  });
+  return firstAvailable(candidates, failedIds);
 }
 
 // ---- end inlined lib block -------------------------------------------------
@@ -548,7 +554,7 @@ async function chatMessage(input: ChatMessageInput, output: ChatMessageOutput): 
   });
   // First candidate, deliberately NOT filtered by failedIds: with the built-in default the
   // chain is one entry long, so skipping a failed id here would strand every later message
-  // on a paid model. Failover owns the skip; see the nextCandidate call sites.
+  // on a paid model. Failover owns the skip; see the nextInChain call sites.
   const chosen = candidates.length > 0 ? candidates[0] : null;
 
   if (chosen) {
@@ -690,7 +696,7 @@ async function toolExecuteBefore(
 // Contract (plan todo 7): tool.execute.after output text matching
 // 429|FreeUsageLimitError|rate.?limit|quota for the session's current free
 // model records it in state.failedIds; every later route walks via
-// nextCandidate(catalog, failedIds) - cap = catalog length, never a retry
+// nextInChain(candidates, failedIds) - cap = catalog length, never a retry
 // loop. Exhaustion restores the session's prior paid model exactly once and
 // shows a notice toast in that same turn (the README-promised notice).
 // failedIds live only in this process's session store: a fresh sessionID
@@ -794,11 +800,16 @@ async function withChatFailover(input: ChatMessageInput, output: ChatMessageOutp
   const fo = getFailover(input.sessionID);
 
   if (state.failedIds.length > 0) {
-    const next = nextCandidate(await scopedCatalog(input.sessionID), state.failedIds);
+    const next = await nextInChain(
+      input.sessionID,
+      typeof input.agent === "string" && input.agent !== "" ? input.agent : "general",
+      (state as SessionStateWithPin).preferredId ?? null,
+      state.failedIds,
+    );
     if (next) {
-      post.providerID = next.providerID;
-      post.modelID = next.modelID;
-      fo.current = { providerID: next.providerID, modelID: next.modelID };
+      post.providerID = next.pick.providerID;
+      post.modelID = next.pick.modelID;
+      fo.current = { providerID: next.pick.providerID, modelID: next.pick.modelID };
       return;
     }
     // Chain exhausted (cap = catalog length): present the restored paid model.
@@ -833,10 +844,18 @@ async function withToolFailover(input: ToolBeforeInput, output: ToolBeforeOutput
   const fo = getFailover(input.sessionID);
 
   if (state.failedIds.length > 0) {
-    const next = nextCandidate(await scopedCatalog(input.sessionID), state.failedIds);
+    const next = await nextInChain(
+      input.sessionID,
+      "general",
+      (state as SessionStateWithPin).preferredId ?? null,
+      state.failedIds,
+    );
     if (next) {
-      (args as { model?: ModelRef }).model = { providerID: next.providerID, modelID: next.modelID };
-      fo.current = { providerID: next.providerID, modelID: next.modelID };
+      (args as { model?: ModelRef }).model = {
+        providerID: next.pick.providerID,
+        modelID: next.pick.modelID,
+      };
+      fo.current = { providerID: next.pick.providerID, modelID: next.pick.modelID };
       return;
     }
     // Chain exhausted: undo the stamp - restore the caller's own paid model,
@@ -878,7 +897,8 @@ async function toolExecuteAfter(input: ToolAfterInput, output: ToolAfterOutput):
     if (state.failedIds.length < cap && state.failedIds.indexOf(failed) === -1) {
       state.failedIds.push(failed);
     }
-    if (nextCandidate(catalog, state.failedIds)) return; // room left: next route walks there
+    if (await nextInChain(sid, "general", (state as SessionStateWithPin).preferredId ?? null, state.failedIds))
+      return; // room left: next route walks there
 
     // Exhausted: paid-restore event fires exactly once per session, and the
     // notice is shown to the user right here (README: "a notice is produced").

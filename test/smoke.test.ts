@@ -447,5 +447,35 @@ check(
   "D: a /free pin prepends to the configured prefer list",
 );
 
+// ---- section 6: failover walks the configured preferences ----
+sessionDirs.set("fail-pref", join(PROJ, "fixtures", "prefer-failover"));
+const fp1 = await routeOnce("fail-pref", "@free say hi");
+check(
+  modelKey(fp1.model) === "opencode/jev-1.13-free",
+  "D: the first configured preference is picked over the built-in default",
+);
+await toolAfter("fail-pref", "HTTP 429 Too Many Requests");
+const fp2 = await routeOnce("fail-pref", "@free say hi");
+check(
+  modelKey(fp2.model) === "opencode-go/longcat-2.5-preview-free",
+  "D: failover follows the configured preferences",
+);
+
+// Review Focus 4: a pin naming a model that does not exist must not empty the
+// chain or throw; the configured preference still serves the turn. Uses a fresh
+// session because a chain that already failed a candidate continues from the
+// next entry, which would mask what the broken pin did.
+sessionDirs.set("fail-pin", join(PROJ, "fixtures", "prefer-failover"));
+const fpToastMark = toasts.length;
+const fp3 = await routeOnce("fail-pin", "@free nope-9-free say hi");
+check(
+  modelKey(fp3.model) === "opencode/jev-1.13-free",
+  "D: a pin naming an unknown model leaves the chain unchanged",
+);
+check(
+  toasts.slice(fpToastMark).some((t) => t.indexOf("nope-9-free") !== -1),
+  "D: an unknown pin warns once naming the id it could not resolve",
+);
+
 console.log(`${pass} pass ${fail} fail`);
 process.exit(fail ? 1 : 0);
