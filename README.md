@@ -10,7 +10,7 @@ Free-tier models are cost-effective for everyday development tasks, but can be t
 
 You can install this plugin directly by pasting this repository's GitHub URL into any OpenCode chat session:
 
-> *"Install the OpenCode free model router plugin from `https://github.com/<owner>/opencode-free-model-router`"*
+> *"Install the OpenCode free model router plugin from `https://github.com/soficis/opencode-free-model-router`"*
 
 ### Instructions for OpenCode Agents / LLMs
 
