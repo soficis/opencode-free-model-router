@@ -21,6 +21,7 @@ const isFreeId = (id: string): boolean => id.endsWith("-free") || id === "big-pi
 // ---- Section 1 setup: both catalog sources fail, so fetchCatalog() -------
 // deterministically returns the pinned list - zero network/CLI.
 process.env["OPENCODE_FREE_ROUTER_MODELS_BIN"] = "fmr-test-no-such-binary";
+process.env["OPENCODE_FREE_ROUTER_GLOBAL_CONFIG"] = join(process.cwd(), "test", "fixtures", "no-such-global-config.json");
 globalThis.fetch = () => Promise.reject(new Error("offline test stub"));
 
 const PAID = { providerID: "opencode-go", modelID: "deepseek-v4.1-flash" };
