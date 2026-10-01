@@ -431,6 +431,16 @@ check(
   modelKey(pZdr.model) === "opencode-go/space-bunny-free",
   "D: zdr-only keeps only safe models from the configured list",
 );
+// zdr-only discarding a CONFIGURED entry is a silent preference loss unless the plugin
+// says so. The built-in tail tier being filtered is the mode working, so it is not named.
+const zdrDropped = "cand-zdr-dropped";
+sessionDirs.set(zdrDropped, zdrPrefDir);
+const markDropped = toasts.length;
+await routeOnce(zdrDropped, "@free say hi", { agent: "general" });
+check(
+  toasts.slice(markDropped).filter((t) => t.includes("mimo-v2.5-free")).length === 1,
+  "D: zdr-only names a configured model it dropped",
+);
 
 // The session pin set by /free <id> prepends to the configured chain. This also
 // covers the pin being READ at all: before candidateList the /free pin was

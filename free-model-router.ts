@@ -361,6 +361,18 @@ function candidateList(catalog: FreeCatalog | null | undefined, opts: ListOption
   let chain = resolved;
   if (zdrOnly) {
     chain = resolved.filter((c) => isZdrSafe(c.pick.modelID));
+    // Only a configured pin or prefer entry is worth naming: dropping the built-in tail tier is
+    // the mode working as designed, so warning there would fire on every message of every project.
+    const dropped = resolved
+      .filter((c) => !isZdrSafe(c.pick.modelID) && c.source !== "built-in")
+      .map((c) => c.pick.modelID);
+    if (dropped.length > 0) {
+      warnOnce(
+        sessionID,
+        "zdr-only-dropped",
+        `free: mode "zdr-only" ignored ${dropped.join(", ")}; those models are not zero-data-retention.`,
+      );
+    }
     if (chain.length === 0) {
       warnOnce(
         sessionID,

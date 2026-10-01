@@ -168,7 +168,7 @@ The live list is fetched at runtime and can differ; the table above is also the 
 | ZDR-safe | `space-bunny-free`, `longcat-2.5-preview-free` | zero data retention per the provider |
 | all other free models | everything else above | treat prompts as potentially retained or used for training |
 
-Use `zdr-only` for any project with code or data you would not want retained. In a `zdr-only` project the mode wins over your preference: a `"prefer"` entry naming a model that is not ZDR-safe is dropped from the chain, and if that empties the chain the built-in ZDR-safe models are used instead with a one-time toast saying so. The router never sets a reasoning effort; do not configure `max` effort on the `muse-spark` free models (they have no max reasoning level).
+Use `zdr-only` for any project with code or data you would not want retained. In a `zdr-only` project the mode wins over your preference: a `"prefer"` entry naming a model that is not ZDR-safe is dropped from the chain, and a one-time toast names the model it ignored so a discarded preference is never silent. The router never sets a reasoning effort; do not configure `max` effort on the `muse-spark` free models (they have no max reasoning level).
 
 ## Limits
 
