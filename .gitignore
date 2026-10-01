@@ -1,13 +1,59 @@
+# Personal, Private & Sensitive Files
 *.keys
+*.key
+*.pem
+*.cert
+*.pfx
+*.p12
 *secret*
 *token*
+*credential*
+*password*
 .env*
-node_modules/
-*.log
+.npmrc
+.pypirc
+.auth/
+auth.json
+
+# Operating System Files
 .DS_Store
+.DS_Store?
+._*
 Thumbs.db
-*.swp
+ehthumbs.db
+desktop.ini
+
+# Editor & IDE Files
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+*.bak
+*.sublime-workspace
+*.sublime-project
+
+# Dependencies & Package Managers
+node_modules/
+bun.lockb
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build & Coverage Artifacts
+dist/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+
+# Development, Agent & Scratch Artifacts
+/.opencode/
 .anchor/
 .superpowers/
+docs/
+discussion.md
+scratch/
+tmp/
+temp/
+*.tmp
