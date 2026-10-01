@@ -369,5 +369,83 @@ check(
 );
 check(badToasts.length === 1, "D: malformed prefer JSON warns exactly once");
 
+// ---- Section 5: candidate chain (order, unknown ids, zdr filtering) -------
+// Ordering is asserted through ROUTING here. The chain TEXT is a later task's
+// deliverable, so counting entries in it is deliberately deferred.
+const unknownFirstDir = join(PROJ, "fixtures", "prefer-unknown-first");
+const allUnknownDir = join(PROJ, "fixtures", "prefer-all-unknown");
+const nonFreeDir = join(PROJ, "fixtures", "prefer-nonfree");
+const dupDir = join(PROJ, "fixtures", "prefer-dup");
+const zdrPrefDir = join(PROJ, "fixtures", "prefer-zdr");
+
+// Review Focus 2, first half: an unknown id is skipped and named exactly once,
+// and the chain stays non-empty because a valid entry follows it.
+const unknownFirst = "cand-unknown-first";
+sessionDirs.set(unknownFirst, unknownFirstDir);
+const markUnknown = toasts.length;
+const pUnknown = await routeOnce(unknownFirst, "@free say hi", { agent: "general" });
+const unknownWarns = toasts.slice(markUnknown).filter((t) => t.includes("nope-9-free"));
+check(
+  modelKey(pUnknown.model) === "opencode-go/space-bunny-free",
+  "D: an unknown prefer id is skipped for the next entry",
+);
+check(unknownWarns.length === 1, "D: an unknown prefer id warns exactly once");
+
+// Review Focus 2, second half: every configured id unknown must still land on a
+// free model (the built-in default), never on the paid one.
+const allUnknown = "cand-all-unknown";
+sessionDirs.set(allUnknown, allUnknownDir);
+const pAllUnknown = await routeOnce(allUnknown, "@free say hi", { agent: "general" });
+check(
+  isFreeId(pAllUnknown.model.modelID) && modelKey(pAllUnknown.model) !== modelKey(PAID),
+  "D: an all-unknown prefer falls back to the built-in free default",
+);
+
+// Review Focus 3: a real model that is not free-tier is absent from the free
+// catalog, so it is dropped exactly like an unknown id.
+const nonFree = "cand-non-free";
+sessionDirs.set(nonFree, nonFreeDir);
+const markNonFree = toasts.length;
+const pNonFree = await routeOnce(nonFree, "@free say hi", { agent: "general" });
+check(
+  isFreeId(pNonFree.model.modelID) && modelKey(pNonFree.model) !== modelKey(PAID),
+  "D: a prefer id that is not free-tier is skipped",
+);
+check(
+  toasts.slice(markNonFree).filter((t) => t.includes(PAID.modelID)).length === 1,
+  "D: a not-free prefer id warns exactly once",
+);
+
+// Dedupe keeps the first occurrence, so a repeated id - bare and qualified -
+// still resolves to the single entry it names.
+const dup = "cand-dup";
+sessionDirs.set(dup, dupDir);
+const pDup = await routeOnce(dup, "@free say hi", { agent: "general" });
+check(modelKey(pDup.model) === "opencode/mimo-v2.5-free", "D: duplicate and bare/qualified ids resolve to one candidate");
+
+// zdr-only drops the configured non-safe entry and keeps the safe one.
+const zdrPref = "cand-zdr";
+sessionDirs.set(zdrPref, zdrPrefDir);
+const pZdr = await routeOnce(zdrPref, "@free say hi", { agent: "general" });
+check(
+  modelKey(pZdr.model) === "opencode-go/space-bunny-free",
+  "D: zdr-only keeps only safe models from the configured list",
+);
+
+// The session pin set by /free <id> prepends to the configured chain. This also
+// covers the pin being READ at all: before candidateList the /free pin was
+// stored on session state and never consulted.
+const pinSid = "cand-pin";
+sessionDirs.set(pinSid, preferStringDir);
+await hooks["command.execute.before"](
+  { command: "free", sessionID: pinSid, arguments: "opencode/longcat-2.5-preview-free" },
+  { parts: [] },
+);
+const pPin = await routeOnce(pinSid, "@free say hi", { agent: "general" });
+check(
+  modelKey(pPin.model) === "opencode/longcat-2.5-preview-free",
+  "D: a /free pin prepends to the configured prefer list",
+);
+
 console.log(`${pass} pass ${fail} fail`);
 process.exit(fail ? 1 : 0);

@@ -28,11 +28,20 @@ interface FreeCatalog {
   go: string[];
 }
 
-interface PickOptions {
-  preferredId?: string;
-  preferIds?: string[] | null;
+type CandidateSource = "pin" | "configured" | "built-in";
+
+interface Candidate {
+  pick: ModelPick;
+  source: CandidateSource;
+}
+
+interface ListOptions {
+  /** Session id, used only to hold the "unusable id" warning to once per session. */
+  sessionID?: string;
+  pin?: string | null;
   role?: string;
   zdrOnly?: boolean;
+  policy?: Policy;
 }
 
 interface ModelPick {
@@ -279,49 +288,110 @@ function matchSpec(allowed: ModelPick[], spec: string): ModelPick | null {
   );
 }
 
-// preferredId (bare or "provider/id") wins; then the user's configured prefer list
-// (unknown ids skipped); else role-mapped default; zdrOnly restricts to
-// the ZDR-safe set. Returns null - never throws - on empty/malformed catalogs.
-function pickFree(catalog: FreeCatalog | null | undefined, opts: PickOptions = {}): ModelPick | null {
+// One ordered candidate chain per (session, role): the session pin first, then the user's
+// configured prefer list, then the built-in role default. The picker and the 429 failover
+// walk this same list, so a preference cannot be honoured on the first turn and silently
+// dropped on the next. Unusable ids are dropped with one warning per session so a stale
+// config degrades to the next source instead of stranding the user on a paid model.
+const warnedSpecs = new Set<string>();
+
+function warnOnce(sessionID: string, key: string, message: string): void {
+  const dedupe = `${sessionID}::${key}`;
+  if (warnedSpecs.has(dedupe)) return;
+  warnedSpecs.add(dedupe);
+  void notify(message);
+}
+
+function candidateList(catalog: FreeCatalog | null | undefined, opts: ListOptions = {}): Candidate[] {
   const entries = toEntries(catalog);
-  if (entries.length === 0) return null;
-  const zdrOnly = opts !== null && opts !== undefined && opts.zdrOnly === true;
-  const allowed = zdrOnly ? entries.filter((e) => isZdrSafe(e.modelID)) : entries;
-  if (allowed.length === 0) return null;
-
+  if (entries.length === 0) return [];
   const options = opts ?? {};
-  const preferred = typeof options.preferredId === "string" ? options.preferredId : "";
-  if (preferred.length > 0) {
-    const hit = matchSpec(allowed, preferred);
-    if (hit) return hit;
-  }
-
-  const preferIds = options.preferIds;
-  if (Array.isArray(preferIds)) {
-    for (const spec of preferIds) {
-      if (typeof spec !== "string" || spec === "") continue;
-      const hit = matchSpec(allowed, spec);
-      if (hit) return hit;
-    }
-  }
-
+  const zdrOnly = options.zdrOnly === true;
   const role = typeof options.role === "string" && options.role.length > 0 ? options.role : undefined;
-  const candidates: (string | undefined)[] = [];
-  if (role && ROLE_DEFAULT_IDS[role]) candidates.push(ROLE_DEFAULT_IDS[role]);
-  candidates.push(ROLE_DEFAULT_IDS["general"]);
-  for (const id of candidates) {
-    if (!id) continue;
-    const hit = allowed.find((e) => e.modelID === id);
-    if (hit) return hit;
+  const policy = options.policy;
+
+  let baseIds: readonly string[];
+  let baseSource: CandidateSource;
+  const rolePref = policy !== undefined && role !== undefined ? policy.preferByRole[role] : undefined;
+  const blanket = policy !== undefined ? policy.preferDefault : null;
+  if (Array.isArray(rolePref) && rolePref.length > 0) {
+    baseIds = rolePref;
+    baseSource = "configured";
+  } else if (Array.isArray(blanket) && blanket.length > 0) {
+    baseIds = blanket;
+    baseSource = "configured";
+  } else {
+    const roleKey = role !== undefined && ROLE_DEFAULT_IDS[role] !== undefined ? role : "general";
+    baseIds = [ROLE_DEFAULT_IDS[roleKey] ?? ROLE_DEFAULT_IDS["general"]];
+    baseSource = "built-in";
   }
 
+  const specs: Array<{ spec: string; source: CandidateSource }> = [];
+  const pin = typeof options.pin === "string" ? options.pin.trim() : "";
+  if (pin.length > 0) specs.push({ spec: pin, source: "pin" });
+  for (const id of baseIds) {
+    if (typeof id === "string" && id.length > 0) specs.push({ spec: id, source: baseSource });
+  }
+
+  const sessionID = typeof options.sessionID === "string" ? options.sessionID : "";
+  const resolved: Candidate[] = [];
+  const seen = new Set<string>();
+  for (const item of specs) {
+    const hit = matchSpec(entries, item.spec);
+    if (hit === null) {
+      warnOnce(sessionID, item.spec, `free: "${item.spec}" is not a free model this router can use; skipping it.`);
+      continue;
+    }
+    const key = `${hit.providerID}/${hit.modelID}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    resolved.push({ pick: hit, source: item.source });
+  }
+
+  let chain = resolved;
   if (zdrOnly) {
-    for (const id of ZDR_PREFERRED_ORDER) {
-      const hit = allowed.find((e) => e.modelID === id);
-      if (hit) return hit;
+    chain = resolved.filter((c) => isZdrSafe(c.pick.modelID));
+    if (chain.length === 0) {
+      warnOnce(
+        sessionID,
+        "zdr-only-exhausted",
+        "free: no configured model is zero-data-retention; using the built-in ZDR-safe models.",
+      );
+      for (const id of ZDR_PREFERRED_ORDER) {
+        const hit = matchSpec(entries, id);
+        if (hit === null) continue;
+        const key = `${hit.providerID}/${hit.modelID}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        chain.push({ pick: hit, source: "built-in" });
+      }
     }
   }
-  return allowed[0] ?? null;
+  if (chain.length === 0) return firstCatalogEntry(entries, zdrOnly, seen);
+  return chain;
+}
+
+// Last rung of the degradation ladder: without it a stale prefer list would send the
+// user straight to a paid model instead of to any free one.
+function firstCatalogEntry(entries: ModelPick[], zdrOnly: boolean, seen: Set<string>): Candidate[] {
+  const pool = zdrOnly ? entries.filter((e) => isZdrSafe(e.modelID)) : entries;
+  const first = pool[0];
+  if (first === undefined) return [];
+  if (seen.has(`${first.providerID}/${first.modelID}`)) return [];
+  return [{ pick: first, source: "built-in" }];
+}
+
+// First candidate that has not already failed this session, matched bare or
+// provider-qualified - the same two-way match the old nextCandidate used.
+function firstAvailable(candidates: Candidate[], failedIds: string[]): Candidate | null {
+  if (!Array.isArray(candidates)) return null;
+  const failed = new Set(Array.isArray(failedIds) ? failedIds.filter((f) => typeof f === "string") : []);
+  for (const candidate of candidates) {
+    if (failed.has(candidate.pick.modelID)) continue;
+    if (failed.has(`${candidate.pick.providerID}/${candidate.pick.modelID}`)) continue;
+    return candidate;
+  }
+  return null;
 }
 
 // Splits "@free" (plus optional id token, bare or provider-qualified) off the text. A token
@@ -465,22 +535,26 @@ async function chatMessage(input: ChatMessageInput, output: ChatMessageOutput): 
     for (const entry of rewritten) entry.part.text = entry.text;
     return;
   }
-  const catalog = await scopedCatalog(input.sessionID);
-  const opts: { preferredId?: string; preferIds?: string[]; role?: string } = {};
-  if (requestedId !== null) opts.preferredId = requestedId;
+  // The full catalog, not scopedCatalog: candidateList does the zdr narrowing itself, so a
+  // configured id that exists but is not ZDR-safe is reported as filtered, not as unknown.
+  const catalog = await fetchCatalog();
   const role = typeof input.agent === "string" && input.agent !== "" ? input.agent : "general";
-  opts.role = role;
-  // Exactly one tier is chosen, never concatenated: a named role beats the
-  // blanket default, and the built-in default is the last resort.
-  const preferIds =
-    policy.preferByRole[role] ?? policy.preferDefault ?? [ROLE_DEFAULT_IDS[role] ?? ROLE_DEFAULT_IDS["general"]];
-  opts.preferIds = preferIds;
-  const picked = pickFree(catalog, opts);
+  const candidates = candidateList(catalog, {
+    sessionID: input.sessionID,
+    pin: requestedId ?? (state as SessionStateWithPin).preferredId ?? null,
+    role,
+    zdrOnly: policy.mode === "zdr-only",
+    policy,
+  });
+  // First candidate, deliberately NOT filtered by failedIds: with the built-in default the
+  // chain is one entry long, so skipping a failed id here would strand every later message
+  // on a paid model. Failover owns the skip; see the nextCandidate call sites.
+  const chosen = candidates.length > 0 ? candidates[0] : null;
 
-  if (picked) {
+  if (chosen) {
     // In place: mutate the EXISTING model object, never rebind output.message.model.
-    output.message.model.providerID = picked.providerID;
-    output.message.model.modelID = picked.modelID;
+    output.message.model.providerID = chosen.pick.providerID;
+    output.message.model.modelID = chosen.pick.modelID;
   }
   // Strip the tag even when no free candidate exists so @free never reaches the LLM.
   for (const entry of rewritten) entry.part.text = entry.text;
@@ -587,9 +661,15 @@ async function toolExecuteBefore(
   const state = await resolveSession(input.sessionID);
   if (state.mode !== "on") return;
 
-  if ((await getPolicy(input.sessionID)).mode === "off") return;
-  const picked = pickFree(await scopedCatalog(input.sessionID));
-  if (!picked) return;
+  const policy = await getPolicy(input.sessionID);
+  if (policy.mode === "off") return;
+  const chain = candidateList(await fetchCatalog(), {
+    sessionID: input.sessionID,
+    zdrOnly: policy.mode === "zdr-only",
+    policy,
+  });
+  if (chain.length === 0) return;
+  const picked = chain[0].pick;
 
   // Stamp onto the EXISTING args object: session/tools.ts#L106-L110 discards
   // the trigger return value, so rebinding output.args would never reach
@@ -689,7 +769,7 @@ function harvestFailureText(output: unknown): string {
 }
 
 // chat.message wrapper: snapshot the pre-free model, let the untouched router
-// run, then apply the failover chain to whatever it picked (pickFree itself
+// run, then apply the failover chain to whatever it picked (candidateList itself
 // has no failedIds knowledge, so a failed first candidate is re-computed here).
 async function withChatFailover(input: ChatMessageInput, output: ChatMessageOutput): Promise<void> {
   const pre = {
@@ -1072,8 +1152,7 @@ async function getPolicy(sessionID: string): Promise<Policy> {
 async function scopedCatalog(sessionID: string) {
   const catalog = await fetchCatalog();
   if ((await getPolicy(sessionID)).mode !== "zdr-only") return catalog;
-  const safe = (id: string) => pickFree({ zen: [id], go: [] }, { zdrOnly: true }) !== null;
-  return { zen: catalog.zen.filter(safe), go: catalog.go.filter(safe) };
+  return { zen: catalog.zen.filter(isZdrSafe), go: catalog.go.filter(isZdrSafe) };
 }
 
 // ---- catalog summary toast (todo 9) ----------------------------------------
