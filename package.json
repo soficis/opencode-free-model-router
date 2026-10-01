@@ -5,8 +5,7 @@
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
-    "test": "bun test/smoke.test.ts",
-    "build": "bun build free-model-router.ts --outfile=dist/free-model-router.ts --target=node --external @opencode-ai/plugin"
+    "test": "bun test/smoke.test.ts"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "*"
