@@ -113,7 +113,7 @@ Candidates in order: 1. opencode/space-bunny-free (pin); 2. opencode/mimo-v2.6-f
 
 ## Choosing Which Free Model You Get (`prefer`)
 
-By default, the router assigns sensible built-in models based on the agent role (e.g. `deepseek-v4-flash-free` for coding and planning, `mimo-v2.6-flash-free` for general tasks).
+By default, the router assigns sensible built-in models based on the agent role (e.g. `muse-spark-1.3-contributor-free` for coding and planning, `mimo-v2.6-flash-free` for general tasks).
 
 You can define your own preference order using the `prefer` key in either config file:
 
@@ -151,8 +151,8 @@ Map preferences to specific OpenCode agent roles (e.g. `build`, `plan`, `general
 {
   "prefer": {
     "default": "opencode/space-bunny-free",
-    "build": ["opencode/deepseek-v4-flash-free", "opencode/mimo-v2.6-flash-free"],
-    "plan": "opencode/deepseek-v4-flash-free",
+    "build": ["opencode/muse-spark-1.3-contributor-free", "opencode/mimo-v2.6-flash-free"],
+    "plan": "opencode/muse-spark-1.3-contributor-free",
     "research": "opencode-go/longcat-2.5-preview-free"
   }
 }
@@ -204,7 +204,6 @@ Verified catalog models (as of September 2026):
 | `opencode-go` | `space-bunny-free` | **Yes** |
 | `opencode-go` | `longcat-2.5-preview-free` | **Yes** |
 | `opencode` | `jev-1.13-free` | No |
-| `opencode` | `deepseek-v4-flash-free` | No |
 | `opencode` | `mimo-v2.6-flash-free` | No |
 | `opencode` | `mimo-v2.5-free` | No |
 | `opencode` | `muse-spark-1.3-contributor-free` | No |

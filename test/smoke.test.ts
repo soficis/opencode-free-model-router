@@ -104,11 +104,11 @@ check(pin.model.providerID === "opencode-go" && pin.model.modelID === "space-bun
 
 // Project policy zdr-only: a non-ZDR request must fall through to a ZDR-safe id.
 sessionDirs.set("p-zdr", join(PROJ, "fixtures", "zdr-only"));
-const zdr = await routeOnce("p-zdr", "@free deepseek-v4-flash-free x");
+const zdr = await routeOnce("p-zdr", "@free muse-spark-1.3-contributor-free x");
 check(["opencode/space-bunny-free", "opencode/longcat-2.5-preview-free", "opencode-go/space-bunny-free", "opencode-go/longcat-2.5-preview-free"].includes(modelKey(zdr.model)), "zdrOnly restricts to ZDR-safe ids");
 
-const allMode = await routeOnce("p-all", "@free deepseek-v4-flash-free x");
-check(allMode.model.modelID === "deepseek-v4-flash-free", "zdrOnly false = all mode");
+const allMode = await routeOnce("p-all", "@free muse-spark-1.3-contributor-free x");
+check(allMode.model.modelID === "muse-spark-1.3-contributor-free", "zdrOnly false = all mode");
 
 // NextCandidate returns null once every scoped (ZDR-safe) id is in failedIds,
 // and that null is what restores the paid model -- assert on that outcome.
@@ -149,7 +149,7 @@ check(a2.text === "ping", "A: tag stripped on the failover turn too");
 check(modelKey(a2.model) === "opencode/jev-1.13-free", "nextCandidate first pick");
 await toolAfter(sidA, "HTTP 429 Too Many Requests");
 const a3 = await routeOnce(sidA, "@free ping");
-check(a3.model.modelID === "deepseek-v4-flash-free" && modelKey(a3.model) !== modelKey(a2.model), "nextCandidate excludes failed id");
+check(a3.model.modelID === "muse-spark-1.3-contributor-free" && modelKey(a3.model) !== modelKey(a2.model), "nextCandidate excludes failed id");
 
 let exhausted: string | null = null;
 for (let i = 0; i < 25; i++) {

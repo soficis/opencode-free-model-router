@@ -67,15 +67,16 @@ const ZDR_PREFERRED_ORDER: readonly string[] = ["space-bunny-free", "longcat-2.5
 // Role -> default free model id; unknown/absent role falls back to "general".
 const ROLE_DEFAULT_IDS: Record<string, string> = {
   general: "mimo-v2.6-flash-free",
-  code: "deepseek-v4-flash-free",
-  plan: "deepseek-v4-flash-free",
-  orchestration: "deepseek-v4-flash-free",
-  subagent: "deepseek-v4-flash-free",
+  build: "muse-spark-1.3-contributor-free",
+  code: "muse-spark-1.3-contributor-free",
+  plan: "muse-spark-1.3-contributor-free",
+  orchestration: "muse-spark-1.3-contributor-free",
+  subagent: "muse-spark-1.3-contributor-free",
   research: "muse-spark-1.3-contributor-free",
   writing: "muse-spark-1.3-contributor-free",
   title: "mimo-v2.6-flash-free",
-  compact: "deepseek-v4-flash-free",
-  summarize: "deepseek-v4-flash-free",
+  compact: "muse-spark-1.3-contributor-free",
+  summarize: "muse-spark-1.3-contributor-free",
 };
 
 // Pinned fallback locked by todo 2 recon 2026-09-29: returned (never thrown) when a
@@ -83,7 +84,6 @@ const ROLE_DEFAULT_IDS: Record<string, string> = {
 const PINNED: FreeCatalog = {
   zen: [
     "jev-1.13-free",
-    "deepseek-v4-flash-free",
     "muse-spark-1.3-contributor-free",
     "muse-spark-1.2-contributor-free",
     "mimo-v2.6-flash-free",
