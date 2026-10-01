@@ -618,7 +618,18 @@ async function commandExecuteBefore(
       shown === ""
         ? `free: no argument. Mode unchanged (${state.mode}). Usage: ${FREE_USAGE}.`
         : `free: unknown argument "${shown}". Mode unchanged (${state.mode}). Usage: ${FREE_USAGE}.`;
-    if (shown === "") await notify(await catalogSummary());
+    if (shown === "") {
+      const chainPolicy = await getPolicy(input.sessionID);
+      const chain = candidateList(await fetchCatalog(), {
+        sessionID: input.sessionID,
+        pin: (state as SessionStateWithPin).preferredId ?? null,
+        role: "general",
+        zdrOnly: chainPolicy.mode === "zdr-only",
+        policy: chainPolicy,
+      });
+      text = `${text} ${formatChain(chain)}`;
+      await notify(await catalogSummary());
+    }
   } else if (parsed.mode === "off") {
     state.mode = "off";
     delete (state as SessionStateWithPin).preferredId;
@@ -1179,6 +1190,20 @@ async function scopedCatalog(sessionID: string) {
 const SUMMARY_MAX = 200;
 
 /** One-line free-catalog summary (<= ~200 chars): per-provider counts + first ids. */
+// The tail tier is far longer than SUMMARY_MAX, so cap by entry count and say
+// how many were elided; truncating mid-id would name a model the user cannot select.
+const CHAIN_MAX = 6;
+
+function formatChain(candidates: Candidate[]): string {
+  if (candidates.length === 0) return "Candidates: none available right now.";
+  const shown = candidates
+    .slice(0, CHAIN_MAX)
+    .map((c, i) => `${i + 1}. ${c.pick.providerID}/${c.pick.modelID} (${c.source})`)
+    .join("; ");
+  const rest = candidates.length - CHAIN_MAX;
+  return rest > 0 ? `Candidates in order: ${shown}; +${rest} more.` : `Candidates in order: ${shown}.`;
+}
+
 async function catalogSummary(): Promise<string> {
   try {
     const c = await fetchCatalog();

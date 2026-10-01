@@ -477,5 +477,41 @@ check(
   "D: an unknown pin warns once naming the id it could not resolve",
 );
 
+// ---- section 7: /free prints the effective chain ----
+const chainSid = "chain-1";
+sessionDirs.set(chainSid, join(PROJ, "fixtures", "prefer-failover"));
+await freeOn(chainSid);
+await hooks["command.execute.before"](
+  { command: "free", sessionID: chainSid, arguments: "opencode/mimo-v2.5-free" },
+  { parts: [] },
+);
+type ChainOut = Parameters<typeof hooks["command.execute.before"]>[1];
+const chainOut: ChainOut = { parts: [] };
+await hooks["command.execute.before"](
+  { command: "free", sessionID: chainSid, arguments: "" },
+  chainOut,
+);
+const chainText = String((chainOut.parts[0] as { text?: unknown } | undefined)?.text ?? "");
+check(
+  chainText.indexOf("Usage: /free on | /free off") !== -1,
+  "E: the no-arg reply keeps the usage line",
+);
+check(
+  chainText.indexOf("1. opencode/mimo-v2.5-free (pin)") !== -1,
+  "E: the pin is listed first and labelled pin",
+);
+check(
+  chainText.indexOf("(configured)") !== -1,
+  "E: configured preferences are labelled configured",
+);
+check(
+  chainText.indexOf("(built-in)") !== -1,
+  "E: the catalog tail tier is labelled built-in",
+);
+check(
+  /\+\d+ more\.$/.test(chainText),
+  "E: a long chain is capped and says how many entries were elided",
+);
+
 console.log(`${pass} pass ${fail} fail`);
 process.exit(fail ? 1 : 0);
