@@ -524,5 +524,211 @@ check(
   "E: a long chain is capped and says how many entries were elided",
 );
 
+// ---- section 8: /free auto - role-allowlist routing ----
+// auto differs from on in three ways: untagged turns are gated on the agent role
+// instead of always routing, /free auto clears a stale pin, and the status line
+// names the allowlist. Default allowlist is ["explore"] (the only built-in free
+// role whose turns reach the chat.message hook - title/compaction/summary call
+// the model directly).
+async function freeAuto(sessionID: string): Promise<string> {
+  const out: ChainOut = { parts: [] };
+  await hooks["command.execute.before"]({ command: "free", sessionID, arguments: "auto" }, out);
+  return String((out.parts[0] as { text?: unknown } | undefined)?.text ?? "");
+}
+
+async function delegateOnce(
+  sessionID: string,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<{ providerID: string; modelID: string } | undefined> {
+  callSeq += 1;
+  const out = { args };
+  await hooks["tool.execute.before"]({ tool, sessionID, callID: `d${callSeq}` }, out);
+  return (out.args as { model?: { providerID: string; modelID: string } }).model;
+}
+
+const autoDir = (name: string): string => join(PROJ, "fixtures", name);
+const autoSid = (name: string): string => `auto-${name}`;
+
+// F1: the default allowlist routes explore, on an otherwise unconfigured project.
+const f1 = autoSid("explore");
+await freeAuto(f1);
+const f1r = await routeOnce(f1, "untagged explore turn", { agent: "explore" });
+check(
+  modelKey(f1r.model) === "opencode/mimo-v2.6-flash-free" && isFreeId(f1r.model.modelID),
+  "F: auto routes an untagged explore turn to the explore default",
+);
+// F2/F3: a non-allowlisted role, and the empty-agent fallback (general), both stay paid.
+const f2 = autoSid("build");
+await freeAuto(f2);
+const f2r = await routeOnce(f2, "untagged build turn", { agent: "build" });
+check(modelKey(f2r.model) === modelKey(PAID), "F: auto leaves a build turn on the paid model");
+const f3 = await routeOnce(f2, "untagged no-agent turn");
+check(modelKey(f3.model) === modelKey(PAID), "F: auto treats a missing agent as general (paid)");
+// F4: an explicit tag still overrides the allowlist.
+const f4r = await routeOnce(f2, "@free tagged build turn", { agent: "build" });
+check(
+  modelKey(f4r.model) !== modelKey(PAID) && isFreeId(f4r.model.modelID) && f4r.text === "tagged build turn",
+  "F: @free routes a build turn under auto and the tag is stripped",
+);
+// F5: a model argument still flips the session out of auto into on.
+const f5 = autoSid("pin-wins");
+await freeAuto(f5);
+await hooks["command.execute.before"](
+  { command: "free", sessionID: f5, arguments: "opencode/jev-1.13-free" },
+  { parts: [] },
+);
+const f5r = await routeOnce(f5, "untagged build turn", { agent: "build" });
+check(
+  modelKey(f5r.model) === "opencode/jev-1.13-free",
+  "F: /free <model-id> leaves auto and pins the model for every role",
+);
+// F6: entering auto must clear a pin recorded earlier, or it would outrank the role default.
+const f6 = autoSid("stale-pin");
+await freeAuto(f6);
+await hooks["command.execute.before"](
+  { command: "free", sessionID: f6, arguments: "opencode/jev-1.13-free" },
+  { parts: [] },
+);
+await freeAuto(f6);
+const f6r = await routeOnce(f6, "untagged explore turn", { agent: "explore" });
+check(
+  modelKey(f6r.model) === "opencode/mimo-v2.6-flash-free",
+  "F: /free auto clears a stale pin so the role default wins",
+);
+// F7: children inherit auto and are judged on their OWN role.
+const f7Par = autoSid("auto-parent");
+const f7Exp = autoSid("auto-child-explore");
+const f7Bld = autoSid("auto-child-build");
+sessionParents.set(f7Exp, f7Par);
+sessionParents.set(f7Bld, f7Par);
+await freeAuto(f7Par);
+const f7r = await routeOnce(f7Exp, "untagged child turn", { agent: "explore" });
+check(modelKey(f7r.model) !== modelKey(PAID) && isFreeId(f7r.model.modelID), "F: a child of an auto parent routes when its role is allowlisted");
+const f7b = await routeOnce(f7Bld, "untagged child turn", { agent: "build" });
+check(modelKey(f7b.model) === modelKey(PAID), "F: a child of an auto parent stays paid for a non-allowlisted role");
+// F8: delegation reads the child role from subagent_type.
+const f8 = autoSid("delegate");
+await freeAuto(f8);
+const f8exp = await delegateOnce(f8, "delegate_task", { subagent_type: "explore", prompt: "go" });
+check(f8exp !== undefined && isFreeId(f8exp.modelID), "F: auto stamps an allowlisted subagent_type with a free model");
+const f8omo = await delegateOnce(f8, "call_omo_agent", { subagent_type: "explore", prompt: "go" });
+check(f8omo !== undefined && isFreeId(f8omo.modelID), "F: auto also stamps call_omo_agent for an allowlisted role");
+const f8bld = await delegateOnce(f8, "delegate_task", { subagent_type: "build", prompt: "go" });
+check(f8bld === undefined, "F: a non-allowlisted subagent_type is left untouched under auto");
+const f8none = await delegateOnce(f8, "delegate_task", { prompt: "go" });
+check(f8none === undefined, "F: a missing subagent_type is left untouched under auto");
+const f8task = await delegateOnce(f8, "task", { subagent_type: "explore" });
+check(f8task === undefined, "F: the core task tool is never stamped (no model param)");
+const f8off = autoSid("delegate-off");
+await freeAuto(f8off);
+await freeOff(f8off);
+const f8offM = await delegateOnce(f8off, "delegate_task", { subagent_type: "explore", prompt: "go" });
+check(f8offM === undefined, "F: an off session never stamps a delegated model");
+
+// F9: auto.roles REPLACES the default list rather than extending it.
+const f9 = autoSid("custom");
+sessionDirs.set(f9, autoDir("auto-custom")); // {"auto":{"roles":["oracle"]}}
+await freeAuto(f9);
+const f9o = await routeOnce(f9, "untagged oracle turn", { agent: "oracle" });
+check(modelKey(f9o.model) !== modelKey(PAID) && isFreeId(f9o.model.modelID), "F: a custom allowlisted role routes under auto");
+const f9e = await routeOnce(f9, "untagged explore turn", { agent: "explore" });
+check(modelKey(f9e.model) === modelKey(PAID), "F: a custom list replaces the default (explore no longer routes)");
+// F10: an empty list routes nothing at all.
+const f10 = autoSid("empty");
+sessionDirs.set(f10, autoDir("auto-empty")); // {"auto":{"roles":[]}}
+await freeAuto(f10);
+const f10r = await routeOnce(f10, "untagged explore turn", { agent: "explore" });
+check(modelKey(f10r.model) === modelKey(PAID), "F: an empty auto.roles list routes nothing");
+// F11: a project in off mode wins over an allowlisted role.
+const f11 = autoSid("off-project");
+sessionDirs.set(f11, autoDir("auto-off")); // {"mode":"off","auto":{"roles":["explore"]}}
+const f11r = await routeOnce(f11, "untagged explore turn", { agent: "explore" });
+check(modelKey(f11r.model) === modelKey(PAID) && f11r.text === "untagged explore turn", "F: project mode off beats the auto allowlist");
+// F12/F8b: a malformed or blank list warns once and falls back to the defaults.
+const f12Mark = toasts.length;
+const f12 = autoSid("bad");
+sessionDirs.set(f12, autoDir("auto-bad")); // {"auto":{"roles":"explore"}}
+await freeAuto(f12);
+const f12r = await routeOnce(f12, "untagged explore turn", { agent: "explore" });
+const f12Warn = toasts.slice(f12Mark).filter((t) => t.indexOf('"auto" in') !== -1);
+check(
+  modelKey(f12r.model) === "opencode/mimo-v2.6-flash-free" && f12Warn.length === 1,
+  "F: a malformed auto block warns exactly once and uses the default roles",
+);
+const f12bMark = toasts.length;
+const f12b = autoSid("blank");
+sessionDirs.set(f12b, autoDir("auto-blank")); // {"auto":{"roles":[" "]}}
+await freeAuto(f12b);
+const f12br = await routeOnce(f12b, "untagged explore turn", { agent: "explore" });
+check(
+  modelKey(f12br.model) === "opencode/mimo-v2.6-flash-free" &&
+    toasts.slice(f12bMark).filter((t) => t.indexOf('"auto" in') !== -1).length === 1,
+  "F: an all-blank role list is treated as a typo and warns once",
+);
+// F13: unroutable roles warn but the rest of the list still routes.
+const f13Mark = toasts.length;
+const f13 = autoSid("unroutable");
+sessionDirs.set(f13, autoDir("auto-unroutable")); // {"auto":{"roles":["title","explore"]}}
+await freeAuto(f13);
+const f13r = await routeOnce(f13, "untagged explore turn", { agent: "explore" });
+const f13Warn = toasts.slice(f13Mark).filter((t) => t.indexOf("can never route") !== -1 && t.indexOf("title") !== -1);
+check(
+  modelKey(f13r.model) === "opencode/mimo-v2.6-flash-free" && f13Warn.length === 1,
+  "F: an unroutable role warns once by name and the remaining roles still route",
+);
+// F14: project auto.roles beats the global list, which applies when no project file does.
+const globalAutoOracle = join(GLOBAL_DIR, "auto-oracle.json"); // {"auto":{"roles":["oracle"]}}
+const f14a = autoSid("global-only");
+await withGlobalConfig(globalAutoOracle, async () => {
+  await freeAuto(f14a);
+  const g = await routeOnce(f14a, "untagged oracle turn", { agent: "oracle" });
+  check(modelKey(g.model) !== modelKey(PAID) && isFreeId(g.model.modelID), "F: a global auto.roles list applies when the project has no policy file");
+  const ge = await routeOnce(f14a, "untagged explore turn", { agent: "explore" });
+  check(modelKey(ge.model) === modelKey(PAID), "F: the global list replaces the default (explore does not route)");
+});
+const f14b = autoSid("project-beats-global");
+sessionDirs.set(f14b, autoDir("auto-project-wins")); // {"auto":{"roles":["explore"]}}
+await withGlobalConfig(globalAutoOracle, async () => {
+  await freeAuto(f14b);
+  const pe = await routeOnce(f14b, "untagged explore turn", { agent: "explore" });
+  check(modelKey(pe.model) !== modelKey(PAID) && isFreeId(pe.model.modelID), "F: a project auto.roles list overrides the global one");
+  const po = await routeOnce(f14b, "untagged oracle turn", { agent: "oracle" });
+  check(modelKey(po.model) === modelKey(PAID), "F: the overridden global role no longer routes");
+});
+// F15: the status lines name the allowlist and drop the old "reserved" wording.
+const f15 = autoSid("status");
+const f15On = await freeAuto(f15);
+check(
+  f15On.indexOf("Auto routes free for: explore") !== -1 && f15On.indexOf("reserved") === -1,
+  "F: /free auto names the active roles and no longer says reserved",
+);
+const f15Out: ChainOut = { parts: [] };
+await hooks["command.execute.before"]({ command: "free", sessionID: f15, arguments: "" }, f15Out);
+const f15Text = String((f15Out.parts[0] as { text?: unknown } | undefined)?.text ?? "");
+check(f15Text.indexOf("Auto routes free for: explore") !== -1, "F: the no-arg status in auto names the allowlist");
+const f15Off = autoSid("status-off");
+await freeOff(f15Off);
+const f15OffOut: ChainOut = { parts: [] };
+await hooks["command.execute.before"]({ command: "free", sessionID: f15Off, arguments: "" }, f15OffOut);
+const f15OffText = String((f15OffOut.parts[0] as { text?: unknown } | undefined)?.text ?? "");
+check(f15OffText.indexOf("Auto routes") === -1, "F: the no-arg status in off does not advertise auto routing");
+// F16: a 429 on an auto-routed turn still walks the chain (chat path only).
+const f16 = autoSid("failover");
+await freeAuto(f16);
+const f16a = await routeOnce(f16, "untagged explore turn", { agent: "explore" });
+await toolAfter(f16, "HTTP 429 rate limit");
+const f16b = await routeOnce(f16, "untagged explore turn", { agent: "explore" });
+check(
+  modelKey(f16a.model) !== modelKey(f16b.model) && isFreeId(f16b.model.modelID),
+  "F: a 429 under auto fails over to a different free model",
+);
+// F17: /free off still wins over an allowlisted role.
+const f17 = autoSid("off-after-auto");
+await freeAuto(f17);
+await freeOff(f17);
+const f17r = await routeOnce(f17, "untagged explore turn", { agent: "explore" });
+check(modelKey(f17r.model) === modelKey(PAID), "F: /free off after auto leaves explore on the paid model");
+
 console.log(`${pass} pass ${fail} fail`);
 process.exit(fail ? 1 : 0);

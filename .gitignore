@@ -51,8 +51,10 @@ coverage/
 /.opencode/
 .anchor/
 .superpowers/
+.omo/
 docs/
-discussion.md
+*discussion*.md
+*plan*.md
 scratch/
 tmp/
 temp/

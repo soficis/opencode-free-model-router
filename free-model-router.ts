@@ -74,6 +74,7 @@ const ROLE_DEFAULT_IDS: Record<string, string> = {
   subagent: "muse-spark-1.3-contributor-free",
   research: "muse-spark-1.3-contributor-free",
   writing: "muse-spark-1.3-contributor-free",
+  explore: "mimo-v2.6-flash-free",
   title: "mimo-v2.6-flash-free",
   compact: "muse-spark-1.3-contributor-free",
   summarize: "muse-spark-1.3-contributor-free",
@@ -544,10 +545,16 @@ async function chatMessage(input: ChatMessageInput, output: ChatMessageOutput): 
     rewritten.push({ part, text: parsed.clean });
   }
 
-  // Route only on an explicit @free tag or when this session is switched on.
-  if (!tagged && state.mode !== "on") return;
+  const role = typeof input.agent === "string" && input.agent !== "" ? input.agent : "general";
 
-  const policy = await getPolicy(input.sessionID);
+  let policy: Policy | null = null;
+  if (!tagged && state.mode !== "on") {
+    if (state.mode !== "auto") return;
+    policy = await getPolicy(input.sessionID);
+    if (policy.mode === "off" || !effectiveAutoRoles(policy).has(role)) return;
+  }
+  policy ??= await getPolicy(input.sessionID);
+
   if (policy.mode === "off") {
     // Project opted out: the tag is still stripped, but nothing routes.
     for (const entry of rewritten) entry.part.text = entry.text;
@@ -556,7 +563,6 @@ async function chatMessage(input: ChatMessageInput, output: ChatMessageOutput): 
   // The full catalog, not scopedCatalog: candidateList does the zdr narrowing itself, so a
   // configured id that exists but is not ZDR-safe is reported as filtered, not as unknown.
   const catalog = await fetchCatalog();
-  const role = typeof input.agent === "string" && input.agent !== "" ? input.agent : "general";
   const candidates = candidateList(catalog, {
     sessionID: input.sessionID,
     pin: requestedId ?? (state as SessionStateWithPin).preferredId ?? null,
@@ -616,7 +622,8 @@ async function commandExecuteBefore(
 ): Promise<void> {
   if (input.command !== "free") return;
   const state = await resolveSession(input.sessionID);
-  if ((await getPolicy(input.sessionID)).mode === "off") {
+  const policy = await getPolicy(input.sessionID);
+  if (policy.mode === "off") {
     output.parts.splice(0, output.parts.length, { type: "text", text: POLICY_OFF_TEXT });
     await notify(POLICY_OFF_TEXT);
     return;
@@ -631,15 +638,15 @@ async function commandExecuteBefore(
         ? `free: no argument. Mode unchanged (${state.mode}). Usage: ${FREE_USAGE}.`
         : `free: unknown argument "${shown}". Mode unchanged (${state.mode}). Usage: ${FREE_USAGE}.`;
     if (shown === "") {
-      const chainPolicy = await getPolicy(input.sessionID);
       const chain = candidateList(await fetchCatalog(), {
         sessionID: input.sessionID,
         pin: (state as SessionStateWithPin).preferredId ?? null,
         role: "general",
-        zdrOnly: chainPolicy.mode === "zdr-only",
-        policy: chainPolicy,
+        zdrOnly: policy.mode === "zdr-only",
+        policy,
       });
       text = `${text} ${formatChain(chain)}`;
+      if (state.mode === "auto") text = `${text} ${formatAutoRoles(policy)}`;
       await notify(await catalogSummary());
     }
   } else if (parsed.mode === "off") {
@@ -655,8 +662,8 @@ async function commandExecuteBefore(
         : `free mode: on for this session. Preferred free model recorded: ${parsed.pin}.`;
   } else {
     state.mode = "auto";
-    text =
-      "free mode: auto for this session (reserved - no automatic routing; the free tag still routes; use /free on to route without a tag).";
+    delete (state as SessionStateWithPin).preferredId;
+    text = `free mode: auto for this session. ${formatAutoRoles(policy)} Other turns stay on your paid model; @free still routes a single message and /free on routes everything.`;
   }
   // prompt.ts keeps its own reference to this array - replace contents in place.
   output.parts.splice(0, output.parts.length, { type: "text", text });
@@ -685,15 +692,22 @@ async function toolExecuteBefore(
   // Any other tool (core read/write/bash, OMO absent) is a strict no-op.
   if (!DELEGATION_TOOLS.has(input.tool)) return;
 
-  // Session gate: only "/free on" reroutes delegation; off/auto pass through
-  // untouched, and an off session never fetches the catalog.
+  // Session gate: off passes through; auto only for allowlisted child roles;
+  // an off session never fetches the catalog.
   const state = await resolveSession(input.sessionID);
-  if (state.mode !== "on") return;
+  if (state.mode === "off") return;
 
   const policy = await getPolicy(input.sessionID);
   if (policy.mode === "off") return;
+  let role: string | undefined;
+  if (state.mode === "auto") {
+    const raw = output.args !== null && typeof output.args === "object" ? (output.args as { subagent_type?: unknown }).subagent_type : undefined;
+    role = typeof raw === "string" && raw.trim() !== "" ? raw.trim() : undefined;
+    if (role === undefined || !effectiveAutoRoles(policy).has(role)) return;
+  }
   const chain = candidateList(await fetchCatalog(), {
     sessionID: input.sessionID,
+    role,
     zdrOnly: policy.mode === "zdr-only",
     policy,
   });
@@ -963,6 +977,7 @@ interface Policy {
   mode: PolicyMode;
   preferByRole: RolePreferenceMap; // named roles only; `default` / `*` excluded
   preferDefault: string[] | null; // merged catch-all, or null to use the built-in
+  autoRoles: string[] | null; // null = use DEFAULT_AUTO_ROLES; [] = route nothing
 }
 interface PolicyCacheEntry {
   dir: string;
@@ -975,13 +990,20 @@ interface PolicyCacheEntry {
 const POLICY_FILE = join(".opencode", "free-model-router.json");
 const GLOBAL_CONFIG_ENV = "OPENCODE_FREE_ROUTER_GLOBAL_CONFIG";
 const POLICY_MODES = new Set<string>(["all", "zdr-only", "off"]);
+
+// Roles routed to free models while the session mode is "auto". `chat.message` only
+// fires for real user turns, so these are the agents that can actually reach the gate.
+const DEFAULT_AUTO_ROLES: readonly string[] = ["explore"];
+// chat.message never fires for these agents (title/compaction call the LLM directly),
+// so listing them can never route anything. Warn instead of silently accepting a dead config.
+const UNROUTABLE_AUTO_ROLES = new Set(["title", "compaction", "summary"]);
 const POLICY_OFF_TEXT =
   "free: routing is disabled for this project by .opencode/free-model-router.json (mode \"off\"). Nothing was changed.";
 const TRAINING_RISK_TEXT =
   "free: free-tier models may use your prompts for training. Add .opencode/free-model-router.json with {\"mode\": \"zdr-only\"} to restrict routing to zero-data-retention models, or \"off\" to disable.";
 
 function emptyPolicy(): Policy {
-  return { mode: "all", preferByRole: {}, preferDefault: null };
+  return { mode: "all", preferByRole: {}, preferDefault: null, autoRoles: null };
 }
 
 /**
@@ -1036,12 +1058,31 @@ function parsePrefer(raw: unknown): { byRole: RolePreferenceMap; fallback: strin
   return { byRole, fallback, invalid };
 }
 
+/**
+ * `auto.roles` is a bare-array-or-nothing key: only `{"roles": [...]}` is valid, so a
+ * mis-written `"auto": ["explore"]` warns instead of silently routing. Role names are
+ * case-sensitive exact matches (they are opencode agent names).
+ */
+function parseAutoRoles(raw: unknown): { roles: string[] | null; invalid: boolean; unroutable: string[] } {
+  if (raw === undefined) return { roles: null, invalid: false, unroutable: [] };
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { roles: null, invalid: true, unroutable: [] };
+  const list = (raw as { roles?: unknown }).roles;
+  if (list === undefined) return { roles: null, invalid: false, unroutable: [] };
+  if (!Array.isArray(list) || list.some((item) => typeof item !== "string")) return { roles: null, invalid: true, unroutable: [] };
+  const roles = [...new Set(list.map((item) => (item as string).trim()).filter((item) => item !== ""))];
+  // An all-blank list is a typo, not "route nothing"; only an explicit [] disables routing.
+  if (list.length > 0 && roles.length === 0) return { roles: null, invalid: true, unroutable: [] };
+  return { roles, invalid: false, unroutable: roles.filter((role) => UNROUTABLE_AUTO_ROLES.has(role)) };
+}
+
 interface PolicyFileRead {
   policy: Policy;
   malformed: boolean;
   modeInvalid: boolean;
   preferInvalid: boolean;
   unknownRoles: string[];
+  autoInvalid: boolean;
+  autoUnroutable: string[];
 }
 
 function readPolicyFile(file: string): PolicyFileRead {
@@ -1049,21 +1090,24 @@ function readPolicyFile(file: string): PolicyFileRead {
   try {
     parsed = JSON.parse(readFileSync(file, "utf8"));
   } catch {
-    return { policy: emptyPolicy(), malformed: true, modeInvalid: false, preferInvalid: false, unknownRoles: [] };
+    return { policy: emptyPolicy(), malformed: true, modeInvalid: false, preferInvalid: false, unknownRoles: [], autoInvalid: false, autoUnroutable: [] };
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { policy: emptyPolicy(), malformed: true, modeInvalid: false, preferInvalid: false, unknownRoles: [] };
+    return { policy: emptyPolicy(), malformed: true, modeInvalid: false, preferInvalid: false, unknownRoles: [], autoInvalid: false, autoUnroutable: [] };
   }
-  const obj = parsed as { mode?: unknown; prefer?: unknown };
+  const obj = parsed as { mode?: unknown; prefer?: unknown; auto?: unknown };
   const mode = typeof obj.mode === "string" && POLICY_MODES.has(obj.mode) ? (obj.mode as PolicyMode) : "all";
   const prefer = parsePrefer(obj.prefer);
+  const auto = parseAutoRoles(obj.auto);
   const unknownRoles = Object.keys(prefer.byRole).filter((role) => !(role in ROLE_DEFAULT_IDS));
   return {
-    policy: { mode, preferByRole: prefer.byRole, preferDefault: prefer.fallback },
+    policy: { mode, preferByRole: prefer.byRole, preferDefault: prefer.fallback, autoRoles: auto.roles },
     malformed: false,
     modeInvalid: obj.mode !== undefined && mode === "all",
     preferInvalid: prefer.invalid,
     unknownRoles,
+    autoInvalid: auto.invalid,
+    autoUnroutable: auto.unroutable,
   };
 }
 
@@ -1077,6 +1121,14 @@ function policyWarnings(read: PolicyFileRead, label: string): string[] {
   }
   if (read.unknownRoles.length > 0) {
     warns.push(`free: unknown role(s) in "prefer" in ${label} ignored: ${read.unknownRoles.join(", ")}.`);
+  }
+  if (read.autoInvalid) {
+    warns.push(`free: "auto" in ${label} must be {"roles": ["agent-name", ...]}; using the default auto roles.`);
+  }
+  if (read.autoUnroutable.length > 0) {
+    warns.push(
+      `free: auto role(s) in ${label} can never route (those agents bypass chat.message): ${read.autoUnroutable.join(", ")}.`,
+    );
   }
   return warns;
 }
@@ -1168,7 +1220,7 @@ async function getPolicy(sessionID: string): Promise<Policy> {
       warns.push(...policyWarnings(read, POLICY_FILE));
     }
 
-    // The global file supplies preferences only: `mode` stays project-scoped so a
+    // The global file supplies preferences and auto roles: `mode` stays project-scoped so a
     // per-user file can never opt a project out of routing.
     if (gMtimeMs !== -1) {
       const global = readPolicyFile(gFile);
@@ -1176,6 +1228,7 @@ async function getPolicy(sessionID: string): Promise<Policy> {
         mode: policy.mode,
         preferByRole: { ...global.policy.preferByRole, ...policy.preferByRole },
         preferDefault: policy.preferDefault ?? global.policy.preferDefault,
+        autoRoles: policy.autoRoles ?? global.policy.autoRoles,
       };
       warns.push(...policyWarnings(global, "the global free-model-router.json"));
     }
@@ -1205,6 +1258,15 @@ const SUMMARY_MAX = 200;
 // The tail tier is far longer than SUMMARY_MAX, so cap by entry count and say
 // how many were elided; truncating mid-id would name a model the user cannot select.
 const CHAIN_MAX = 6;
+
+function effectiveAutoRoles(policy: Policy): Set<string> {
+  return new Set(policy.autoRoles ?? DEFAULT_AUTO_ROLES);
+}
+
+function formatAutoRoles(policy: Policy): string {
+  const roles = [...effectiveAutoRoles(policy)];
+  return roles.length === 0 ? "Auto routes nothing (auto.roles is empty)." : `Auto routes free for: ${roles.join(", ")}.`;
+}
 
 function formatChain(candidates: Candidate[]): string {
   if (candidates.length === 0) return "Candidates: none available right now.";
