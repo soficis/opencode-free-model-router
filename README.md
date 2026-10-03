@@ -1,25 +1,27 @@
 # opencode-free-model-router
 
-An [OpenCode](https://opencode.ai) plugin that routes chat turns to free-tier models served by both **opencode** (Zen) and **opencode-go** providers, featuring automatic 429 rate-limit failover, subagent inheritance, Zero Data Retention (ZDR) privacy policies, and customizable preference cascades.
+Your OpenCode bill can drop to zero for the boring work.
 
-Free-tier models are cost-effective for everyday development tasks, but can be temporary, rate-limited, or subject to prompt training. This plugin makes free routing fully opt-in per message, per session, and per project—while maintaining seamless fallback to paid models when quotas are exhausted.
+This [OpenCode](https://opencode.ai) plugin sends chat turns to free-tier models from the **opencode** (Zen) and **opencode-go** providers. When a free model hits a 429 rate limit, the plugin tries the next one. When the free quota runs out, your paid model takes over.
+
+Free models are cheap but come with strings. They can vanish. They can throttle you. Some train on your prompts. So free routing is opt-in. You choose per message, per session, or per project.
 
 ---
 
 ## Install
 
-You can install this plugin directly by pasting this repository's GitHub URL into any OpenCode chat session:
+Paste this into any OpenCode chat:
 
 > *"Install the OpenCode free model router plugin from `https://github.com/soficis/opencode-free-model-router`"*
 
-Install in **one scope only** (global `~/.config/opencode` OR project `<project>/.opencode`). OpenCode loads every copy it finds, and two copies run with unsynchronized session state.
+Or install it by hand. Pick **one scope**: global (`~/.config/opencode`) or project (`<project>/.opencode`). OpenCode loads every copy it finds. Two copies run with unsynchronized session state.
 
 | File | Destination |
 | --- | --- |
 | `free-model-router.ts` | `<config-dir>/plugins/free-model-router.ts` |
 | `command/free.md` | `<config-dir>/command/free.md` |
 
-`<config-dir>` is `~/.config/opencode` (Linux/macOS) or `%USERPROFILE%\.config\opencode` (Windows).
+`<config-dir>` is `~/.config/opencode` on Linux and macOS. On Windows it is `%USERPROFILE%\.config\opencode`.
 
 #### Linux / macOS
 ```bash
@@ -35,15 +37,15 @@ Copy-Item free-model-router.ts "$HOME\.config\opencode\plugins\free-model-router
 Copy-Item command\free.md "$HOME\.config\opencode\command\free.md"
 ```
 
-Restart OpenCode, then run `/free` — it should display the current routing status and candidate chain.
+Restart OpenCode. Run `/free`. It prints the routing status and the candidate chain.
 
 ---
 
-## Usage Guide
+## Use it
 
-### 1. Per-Message Routing (`@free`)
+### Route one message (`@free`)
 
-Add `@free` to any message. You can optionally name a specific free model:
+Add `@free` to a message. Optionally name a model.
 
 ```text
 @free explain this stack trace
@@ -51,23 +53,21 @@ Add `@free` to any message. You can optionally name a specific free model:
 @free opencode-go/longcat-2.5-preview-free write a test suite
 ```
 
-Model IDs may be written bare (`space-bunny-free`) or provider-qualified (`opencode/space-bunny-free` or `opencode-go/space-bunny-free`).
+Write model IDs bare (`space-bunny-free`) or with a provider (`opencode/space-bunny-free`, `opencode-go/space-bunny-free`).
 
-### 2. Session Toggles (`/free`)
+### Route a whole session (`/free`)
 
-Use the `/free` slash command to manage routing across an entire session:
-
-| Command | Description |
+| Command | Effect |
 | --- | --- |
-| `/free on` | Routes all subsequent messages in this session to free models |
-| `/free off` | Restores your configured paid model (default) |
-| `/free auto` | Routes only allowlisted agent roles (default: `explore`) to free models |
-| `/free <provider/model-id>` | Activates free routing and pins that model as the top choice |
-| `/free` | Displays current mode, usage summary, and the ordered candidate chain |
+| `/free on` | Sends every later message in this session to free models |
+| `/free off` | Returns to your paid model (the default) |
+| `/free auto` | Sends only allowlisted agent roles to free models (default: `explore`) |
+| `/free <provider/model-id>` | Turns free routing on and pins that model first |
+| `/free` | Shows the mode, a usage summary, and the candidate chain |
 
-### 3. Inspecting the Candidate Chain
+### See the candidate chain
 
-Running `/free` with no arguments prints the active candidate chain:
+Run `/free` with no arguments:
 
 ```text
 free: mode unchanged (off). Usage: /free on | /free off | /free auto | /free <provider/model-id>.
@@ -76,20 +76,18 @@ Candidates in order: 1. opencode/space-bunny-free (pin); 2. opencode/mimo-v2.6-f
 
 ---
 
-## Choosing Which Free Model You Get (`prefer`)
+## Pick your free model (`prefer`)
 
-By default, the router assigns sensible built-in models based on the agent role (e.g. `muse-spark-1.3-contributor-free` for coding and planning, `mimo-v2.6-flash-free` for general tasks).
+Without config, the router picks a built-in model for each agent role. `muse-spark-1.3-contributor-free` handles coding and planning. `mimo-v2.6-flash-free` handles general tasks.
 
-You can define your own preference order using the `prefer` key in either config file:
+You can override that. Add a `prefer` key to either config file:
 
 | Scope | Path | Purpose |
 | --- | --- | --- |
-| **Global** | `~/.config/opencode/free-model-router.json` | Default preference across all your projects |
-| **Project** | `<project>/.opencode/free-model-router.json` | Project-specific preference (overrides global) |
+| **Global** | `~/.config/opencode/free-model-router.json` | Default for all your projects |
+| **Project** | `<project>/.opencode/free-model-router.json` | Overrides global |
 
-*(Set `OPENCODE_FREE_ROUTER_GLOBAL_CONFIG` environment variable to override the global config path).*
-
-### Example Configuration
+Set `OPENCODE_FREE_ROUTER_GLOBAL_CONFIG` to move the global file.
 
 ```json
 {
@@ -100,17 +98,24 @@ You can define your own preference order using the `prefer` key in either config
 }
 ```
 
-Map preferences to specific agent roles (`build`, `plan`, `general`, `explore`, custom agents). `prefer` also accepts a bare model string or an ordered fallback list; use `"default"` (or `*`) as the catch-all. When a model hits a 429 rate limit, failover moves to the next model in the list.
+Keys are agent roles: `build`, `plan`, `general`, `explore`, or your own. Values are a model string or an ordered fallback list. Use `"default"` (or `*`) as the catch-all. On a 429, the router moves to the next model in the list.
 
-### Resolution Order
+### Which model wins
 
-When selecting a model for a turn, the router walks this chain and takes the first match: session pin (`/free <model-id>`, `@free <model-id>`) → project role → global role → project `"default"` → global `"default"` → built-in role default → remaining free catalog → your paid model.
+The router takes the first match in this order:
 
-### Automatic Routing Roles (`auto.roles`)
+1. Session pin (`/free <model-id>` or `@free <model-id>`)
+2. Project role
+3. Global role
+4. Project `"default"`
+5. Global `"default"`
+6. Built-in role default
+7. Rest of the free catalog
+8. Your paid model
 
-When session mode is `/free auto`, only specific agent roles are routed to free models, leaving primary coding turns (`build`, `plan`, `general`) on your paid model.
+### Choose roles for `/free auto` (`auto.roles`)
 
-You can customize which roles route automatically via the `auto.roles` setting in project or global config:
+In `/free auto` mode, only listed roles go to free models. Your main coding turns (`build`, `plan`, `general`) stay on your paid model.
 
 ```json
 {
@@ -120,17 +125,17 @@ You can customize which roles route automatically via the `auto.roles` setting i
 }
 ```
 
-- **Schema**: `{"auto": {"roles": ["agent-name", ...]}}`. Bare arrays like `{"auto": [...]}` are invalid and trigger a warning.
-- **Replace, not extend**: Setting `auto.roles` completely replaces the built-in default (`["explore"]`). To disable automatic routing entirely, set `"roles": []`.
-- **Global & project cascade**: A project-level `auto.roles` takes precedence over global config. If not specified in the project, the global list is used; if neither is set, the default `["explore"]` applies.
-- **Unroutable roles**: `title`, `compaction`, and `summary` cannot be routed because OpenCode calls LLMs directly for those tasks, bypassing the `chat.message` hook. Specifying them produces a configuration warning.
-- **Privacy notice**: The `explore` agent searches and reads workspace files, sending file contents to the selected free-tier model. If prompt privacy or data retention is a concern, configure `"mode": "zdr-only"` to restrict routing to verified zero-data-retention models.
+- **Schema:** `{"auto": {"roles": ["agent-name", ...]}}`. A bare array like `{"auto": [...]}` is invalid and triggers a warning.
+- **Replace, not extend:** Your list replaces the built-in default (`["explore"]`). Set `"roles": []` to turn auto routing off.
+- **Cascade:** Project config beats global config. With neither set, `["explore"]` applies.
+- **Unroutable roles:** `title`, `compaction`, and `summary` cannot be routed. OpenCode calls the LLM directly for them and skips the `chat.message` hook. Listing them produces a warning.
+- **Privacy:** The `explore` agent reads your workspace files and sends their contents to a free-tier model. If that worries you, set `"mode": "zdr-only"`.
 
 ---
 
-## Per-Project Privacy Policy (`mode`)
+## Set a privacy policy per project (`mode`)
 
-Create `<project>/.opencode/free-model-router.json` to enforce project-level boundaries:
+Create `<project>/.opencode/free-model-router.json`:
 
 ```json
 {
@@ -140,19 +145,19 @@ Create `<project>/.opencode/free-model-router.json` to enforce project-level bou
 
 | Mode | Behavior |
 | --- | --- |
-| `"all"` | Allows any free model (default when absent; displays a one-time prompt training risk toast). |
-| `"zdr-only"` | **Zero Data Retention only**. Restricts routing strictly to verified ZDR models (`space-bunny-free`, `longcat-2.5-preview-free`). Automatically drops non-ZDR models from preference chains with a toast notification. |
-| `"off"` | **Disables free routing**. `@free` tags are stripped and ignored, `/free` toggles are blocked, and all requests stay on paid models. |
+| `"all"` | Allows any free model. This is the default. A one-time toast warns about prompt training. |
+| `"zdr-only"` | Allows only verified Zero Data Retention models (`space-bunny-free`, `longcat-2.5-preview-free`). Drops other models from preference chains and shows a toast. |
+| `"off"` | Disables free routing. `@free` tags are stripped and ignored. `/free` toggles are blocked. Every request stays on paid models. |
 
-> **Privacy Note**: `mode` is strictly project-scoped. Global configs cannot disable or force modes on individual projects.
+> **Privacy note:** `mode` is project-scoped only. A global config cannot force or disable a mode for a project.
 
 ---
 
-## Catalog & Zero Data Retention Reference
+## Catalog and ZDR reference
 
-Verified catalog models (as of September 2026):
+Verified models, as of September 2026:
 
-| Provider | Model ID | ZDR-Safe (Zero Data Retention) |
+| Provider | Model ID | ZDR-safe |
 | --- | --- | :---: |
 | `opencode` | `space-bunny-free` | **Yes** |
 | `opencode` | `longcat-2.5-preview-free` | **Yes** |
@@ -170,26 +175,26 @@ Verified catalog models (as of September 2026):
 
 ---
 
-## Technical Invariants & Architecture
+## Design rules
 
-- **Single Default Export**: OpenCode scans `.ts` files in the plugin directory. Exporting non-functions causes OpenCode to fail with *"Plugin export is not a function"*. `free-model-router.ts` maintains exactly one default function export.
-- **Single-Scope Loading**: OpenCode loads every copy of a plugin file it finds. Installing in both global and project directories causes double-execution with unsynchronized session states.
-- **Non-Fatal Degradation**: Network failures, malformed JSON, and unknown model IDs degrade gracefully to safe defaults and issue descriptive toasts; they never crash the chat session.
-- **Bounded Hooks**: All session resolution and network calls are wrapped with deadlines to prevent hanging the OpenCode TUI.
+- **One default export.** OpenCode scans every `.ts` file in the plugin directory. A non-function export fails with *"Plugin export is not a function"*. `free-model-router.ts` exports exactly one default function.
+- **One install scope.** OpenCode loads every copy it finds. Two copies double-execute with unsynchronized state.
+- **Failures degrade, never crash.** Network errors, malformed JSON, and unknown model IDs fall back to safe defaults and show a toast. The chat session survives.
+- **Hooks have deadlines.** Session resolution and network calls time out. The TUI never hangs.
 
 ---
 
-## Development & Testing
+## Test
 
-Run the hermetic smoke test suite:
+Run the smoke suite:
 
 ```bash
 bun test/smoke.test.ts
 ```
 
-*(Or via Node/tsx: `npx -y tsx test/smoke.test.ts`)*
+Or with Node: `npx -y tsx test/smoke.test.ts`
 
-The suite exercises hook surfaces, tag parsing, 429 failover walks, project policy switching, subagent inheritance, and preference hierarchies entirely offline against pinned fixtures.
+The suite runs offline against pinned fixtures. It covers hook surfaces, tag parsing, 429 failover, project policy switching, subagent inheritance, and preference order.
 
 ---
 
