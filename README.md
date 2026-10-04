@@ -155,23 +155,25 @@ Create `<project>/.opencode/free-model-router.json`:
 
 ## Catalog and ZDR reference
 
-Verified models, as of September 2026:
+Verified models, as of October 2026:
 
-| Provider | Model ID | ZDR-safe |
-| --- | --- | :---: |
-| `opencode` | `space-bunny-free` | **Yes** |
-| `opencode` | `longcat-2.5-preview-free` | **Yes** |
-| `opencode-go` | `space-bunny-free` | **Yes** |
-| `opencode-go` | `longcat-2.5-preview-free` | **Yes** |
-| `opencode` | `jev-1.13-free` | No |
-| `opencode` | `mimo-v2.6-flash-free` | No |
-| `opencode` | `mimo-v2.5-free` | No |
-| `opencode` | `muse-spark-1.3-contributor-free` | No |
-| `opencode` | `muse-spark-1.2-contributor-free` | No |
-| `opencode` | `ling-3.0-flash-fin-free` | No |
-| `opencode` | `nemotron-3-ultra-free` | No |
-| `opencode` | `nemotron-3.5-lightning-free` | No |
-| `opencode` | `big-pickle` | No |
+| Provider | Model ID | ZDR-safe | Retention & Training Policy |
+| --- | --- | :---: | --- |
+| `opencode` | `space-bunny-free` | **Yes** | Zero-retention policy; no prompt training |
+| `opencode` | `longcat-2.5-preview-free` | **Yes** | Zero-retention policy; no prompt training |
+| `opencode-go` | `space-bunny-free` | **Yes** | Zero-retention policy; no prompt training |
+| `opencode-go` | `longcat-2.5-preview-free` | **Yes** | Zero-retention policy; no prompt training |
+| `opencode` | `fledge-alpha-free` | No | Free preview; collected data may be used to improve model |
+| `opencode` | `ling-3.1-flash-free` | No | Free tier; collected data may be used to improve model |
+| `opencode` | `ling-3.0-flash-fin-free` | No | Free tier; collected data may be used to improve model |
+| `opencode` | `mimo-v2.6-flash-free` | No | Free tier; collected data may be used to improve model |
+| `opencode` | `mimo-v2.5-free` | No | Free tier; collected data may be used to improve model |
+| `opencode` | `nemotron-3-ultra-free` | No | NVIDIA trial endpoint; logged for security & service improvement |
+| `opencode` | `nemotron-3.5-lightning-free` | No | NVIDIA trial endpoint; logged for security & service improvement |
+| `opencode` | `muse-spark-1.3-contributor-free` | No | Contributor tier; prompts/completions train future Meta models |
+| `opencode` | `muse-spark-1.2-contributor-free` | No | Contributor tier; prompts/completions train future Meta models |
+| `opencode` | `big-pickle` | No | Stealth free model; collected data may be used to improve model |
+| `opencode` | `jev-1.13-free` | No | Structured decision model; data retained per TypeSafe AI policy |
 
 ---
 
