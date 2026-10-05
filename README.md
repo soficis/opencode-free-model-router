@@ -61,7 +61,7 @@ Write model IDs bare (`space-bunny-free`) or with a provider (`opencode/space-bu
 | --- | --- |
 | `/free on` | Sends every later message in this session to free models |
 | `/free off` | Returns to your paid model (the default) |
-| `/free auto` | Sends only allowlisted agent roles to free models (default: `explore`) |
+| `/free auto` | Sends only allowlisted agent roles to free models (default: `explore`, `explorer`, `librarian`, `research`) |
 | `/free <provider/model-id>` | Turns free routing on and pins that model first |
 | `/free` | Shows the mode, a usage summary, and the candidate chain |
 
@@ -78,7 +78,7 @@ Candidates in order: 1. opencode/space-bunny-free (pin); 2. opencode/mimo-v2.6-f
 
 ## Pick your free model (`prefer`)
 
-Without config, the router picks a built-in model for each agent role. `muse-spark-1.3-contributor-free` handles coding and planning. `mimo-v2.6-flash-free` handles general tasks.
+Without config, the router picks a built-in model for each agent role. `muse-spark-1.3-contributor-free` handles coding, planning, and the research family (`explore`, `explorer`, `librarian`, `research`). `mimo-v2.6-flash-free` handles general tasks.
 
 You can override that. Add a `prefer` key to either config file:
 
@@ -98,7 +98,7 @@ Set `OPENCODE_FREE_ROUTER_GLOBAL_CONFIG` to move the global file.
 }
 ```
 
-Keys are agent roles: `build`, `plan`, `general`, `explore`, or your own. Values are a model string or an ordered fallback list. Use `"default"` (or `*`) as the catch-all. On a 429, the router moves to the next model in the list.
+Keys are agent roles: `build`, `plan`, `general`, `explore`, `explorer`, `librarian`, `research`, or your own. The research family is covered under both host spellings: core opencode registers `explore`, OMO slim registers `explorer` and `librarian`. A `prefer` entry naming any of them is a recognized role, so the same policy works on either host. Values are a model string or an ordered fallback list. Use `"default"` (or `*`) as the catch-all. On a 429, the router moves to the next model in the list.
 
 ### Which model wins
 
@@ -115,21 +115,22 @@ The router takes the first match in this order:
 
 ### Choose roles for `/free auto` (`auto.roles`)
 
-In `/free auto` mode, only listed roles go to free models. Your main coding turns (`build`, `plan`, `general`) stay on your paid model.
+In `/free auto` mode, only listed roles go to free models. Your main coding turns (`build`, `plan`, `general`) stay on your paid model. The built-in default is the research family: `explore`, `explorer`, `librarian`, `research`.
 
 ```json
 {
   "auto": {
-    "roles": ["explore"]
+    "roles": ["explore", "explorer", "librarian", "research"]
   }
 }
 ```
 
 - **Schema:** `{"auto": {"roles": ["agent-name", ...]}}`. A bare array like `{"auto": [...]}` is invalid and triggers a warning.
-- **Replace, not extend:** Your list replaces the built-in default (`["explore"]`). Set `"roles": []` to turn auto routing off.
-- **Cascade:** Project config beats global config. With neither set, `["explore"]` applies.
+- **Replace, not extend:** Your list replaces the built-in default (`["explore", "explorer", "librarian", "research"]`). Set `"roles": []` to turn auto routing off.
+- **Cascade:** Project config beats global config. With neither set, `["explore", "explorer", "librarian", "research"]` applies.
+- **Hosts:** Both host spellings are covered: core opencode registers `explore`, OMO slim registers `explorer` and `librarian`. The same `auto.roles` policy works on either host.
 - **Unroutable roles:** `title`, `compaction`, and `summary` cannot be routed. OpenCode calls the LLM directly for them and skips the `chat.message` hook. Listing them produces a warning.
-- **Privacy:** The `explore` agent reads your workspace files and sends their contents to a free-tier model. If that worries you, set `"mode": "zdr-only"`.
+- **Privacy:** The research agents (`explore`, `explorer`, `librarian`) read your workspace files and send their contents to a free-tier model. If that worries you, set `"mode": "zdr-only"`.
 
 ---
 
@@ -183,6 +184,7 @@ Verified models, as of October 2026:
 - **One install scope.** OpenCode loads every copy it finds. Two copies double-execute with unsynchronized state.
 - **Failures degrade, never crash.** Network errors, malformed JSON, and unknown model IDs fall back to safe defaults and show a toast. The chat session survives.
 - **Hooks have deadlines.** Session resolution and network calls time out. The TUI never hangs.
+- **The catalog probe cannot recurse.** The `opencode models` CLI spawn reloads this plugin in the child process, which would spawn another probe forever. The child refuses to spawn again (`OPENCODE_FMR_NO_SPAWN`), so discovery degrades to the pinned fallback instead of fork-bombing.
 
 ---
 

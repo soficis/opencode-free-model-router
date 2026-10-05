@@ -74,7 +74,14 @@ const ROLE_DEFAULT_IDS: Record<string, string> = {
   subagent: "muse-spark-1.3-contributor-free",
   research: "muse-spark-1.3-contributor-free",
   writing: "muse-spark-1.3-contributor-free",
-  explore: "mimo-v2.6-flash-free",
+  // Research family. `explore` is core opencode's recon agent; `explorer` and `librarian`
+  // are the OMO slim spellings (slim renamed `explore` -> `explorer` and added a docs-research
+  // `librarian`). They are listed as real keys rather than aliases because readPolicyFile
+  // warns about any `prefer` role missing here (L1102), so a per-role prefer naming a slim
+  // agent must not be rejected as an unknown role.
+  explore: "muse-spark-1.3-contributor-free",
+  explorer: "muse-spark-1.3-contributor-free",
+  librarian: "muse-spark-1.3-contributor-free",
   title: "mimo-v2.6-flash-free",
   compact: "muse-spark-1.3-contributor-free",
   summarize: "muse-spark-1.3-contributor-free",
@@ -218,6 +225,9 @@ async function fetchCatalog(): Promise<FreeCatalog> {
 
     // The only process call in this module (opencode models CLI).
     try {
+      // Recursion guard: the spawned `opencode models` loads this same plugin, which would spawn
+      // another `opencode models`, forever (fork bomb + leaked loopback listeners, 2026-10-04).
+      if (process.env["OPENCODE_FMR_NO_SPAWN"]) throw new Error("child of catalog probe; no recursion");
       const envBin = process.env[MODELS_BIN_ENV];
       const bin = envBin && envBin.length > 0 ? envBin : DEFAULT_MODELS_BIN;
       const { execFile } = await import("node:child_process");
@@ -234,6 +244,7 @@ async function fetchCatalog(): Promise<FreeCatalog> {
               maxBuffer: 4 * 1024 * 1024,
               windowsHide: true,
               encoding: "utf8",
+              env: { ...process.env, OPENCODE_FMR_NO_SPAWN: "1" },
             },
             (err, out) => {
               if (err) reject(err);
@@ -993,7 +1004,12 @@ const POLICY_MODES = new Set<string>(["all", "zdr-only", "off"]);
 
 // Roles routed to free models while the session mode is "auto". `chat.message` only
 // fires for real user turns, so these are the agents that can actually reach the gate.
-const DEFAULT_AUTO_ROLES: readonly string[] = ["explore"];
+// The research family is listed under both host spellings on purpose: core opencode
+// registers `explore`, OMO slim registers `explorer` (plus a research-only `librarian`).
+// Slim has no `call_omo_agent`/`delegate_task` and delegates through the native `task`
+// tool, which toolExecuteBefore skips by design, so a slim subagent is routed by its own
+// `chat.message` turn - which only works if its agent name is in this allowlist.
+const DEFAULT_AUTO_ROLES: readonly string[] = ["explore", "explorer", "librarian", "research"];
 // chat.message never fires for these agents (title/compaction call the LLM directly),
 // so listing them can never route anything. Warn instead of silently accepting a dead config.
 const UNROUTABLE_AUTO_ROLES = new Set(["title", "compaction", "summary"]);

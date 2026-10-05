@@ -307,6 +307,35 @@ check(
   "D: a per-role default applies to an unnamed role",
 );
 
+// OMO slim's agent spellings are real roles, not unknown ones: per-role prefers
+// for `explorer`/`librarian` must apply with no unknown-role warning, and the
+// catch-all must still answer every role the named entries do not cover.
+const preferSlimDir = join(PROJ, "fixtures", "prefer-slim-roles");
+const slimExplorer = "prefer-slim-explorer";
+sessionDirs.set(slimExplorer, preferSlimDir);
+const slimWarnMark = toasts.length;
+const pSlimExplorer = await routeOnce(slimExplorer, "@free say hi", { agent: "explorer" });
+check(
+  modelKey(pSlimExplorer.model) === "opencode/muse-spark-1.3-contributor-free",
+  "D: a per-role prefer for the slim explorer name applies",
+);
+const slimLibrarian = "prefer-slim-librarian";
+sessionDirs.set(slimLibrarian, preferSlimDir);
+const pSlimLibrarian = await routeOnce(slimLibrarian, "@free say hi", { agent: "librarian" });
+check(
+  modelKey(pSlimLibrarian.model) === "opencode/muse-spark-1.3-contributor-free",
+  "D: a per-role prefer for the slim librarian name applies",
+);
+const slimOther = "prefer-slim-other";
+sessionDirs.set(slimOther, preferSlimDir);
+const pSlimOther = await routeOnce(slimOther, "@free say hi", { agent: "general" });
+check(
+  modelKey(pSlimOther.model) === "opencode/space-bunny-free",
+  "D: the catch-all prefer still answers a role the slim entries do not name",
+);
+const slimWarns = toasts.slice(slimWarnMark).filter((t) => t.indexOf("unknown role") !== -1);
+check(slimWarns.length === 0, "D: slim agent names in prefer are recognized roles (no unknown-role warning)");
+
 // Review Focus 1: a global named role must win for that role, while the
 // project's blanket prefer still answers every other role. Tiers are picked
 // from, never concatenated, so neither id may appear twice in one chain.
@@ -527,9 +556,10 @@ check(
 // ---- section 8: /free auto - role-allowlist routing ----
 // auto differs from on in three ways: untagged turns are gated on the agent role
 // instead of always routing, /free auto clears a stale pin, and the status line
-// names the allowlist. Default allowlist is ["explore"] (the only built-in free
-// role whose turns reach the chat.message hook - title/compaction/summary call
-// the model directly).
+// names the allowlist. The default allowlist is ["explore", "explorer",
+// "librarian", "research"] - the research family under both host spellings
+// (core opencode's `explore`; OMO slim's `explorer`/`librarian`), all of which
+// reach the chat.message hook (title/compaction/summary call the model directly).
 async function freeAuto(sessionID: string): Promise<string> {
   const out: ChainOut = { parts: [] };
   await hooks["command.execute.before"]({ command: "free", sessionID, arguments: "auto" }, out);
@@ -555,7 +585,7 @@ const f1 = autoSid("explore");
 await freeAuto(f1);
 const f1r = await routeOnce(f1, "untagged explore turn", { agent: "explore" });
 check(
-  modelKey(f1r.model) === "opencode/mimo-v2.6-flash-free" && isFreeId(f1r.model.modelID),
+  modelKey(f1r.model) === "opencode/muse-spark-1.3-contributor-free" && isFreeId(f1r.model.modelID),
   "F: auto routes an untagged explore turn to the explore default",
 );
 // F2/F3: a non-allowlisted role, and the empty-agent fallback (general), both stay paid.
@@ -593,7 +623,7 @@ await hooks["command.execute.before"](
 await freeAuto(f6);
 const f6r = await routeOnce(f6, "untagged explore turn", { agent: "explore" });
 check(
-  modelKey(f6r.model) === "opencode/mimo-v2.6-flash-free",
+  modelKey(f6r.model) === "opencode/muse-spark-1.3-contributor-free",
   "F: /free auto clears a stale pin so the role default wins",
 );
 // F7: children inherit auto and are judged on their OWN role.
@@ -653,7 +683,7 @@ await freeAuto(f12);
 const f12r = await routeOnce(f12, "untagged explore turn", { agent: "explore" });
 const f12Warn = toasts.slice(f12Mark).filter((t) => t.indexOf('"auto" in') !== -1);
 check(
-  modelKey(f12r.model) === "opencode/mimo-v2.6-flash-free" && f12Warn.length === 1,
+  modelKey(f12r.model) === "opencode/muse-spark-1.3-contributor-free" && f12Warn.length === 1,
   "F: a malformed auto block warns exactly once and uses the default roles",
 );
 const f12bMark = toasts.length;
@@ -662,7 +692,7 @@ sessionDirs.set(f12b, autoDir("auto-blank")); // {"auto":{"roles":[" "]}}
 await freeAuto(f12b);
 const f12br = await routeOnce(f12b, "untagged explore turn", { agent: "explore" });
 check(
-  modelKey(f12br.model) === "opencode/mimo-v2.6-flash-free" &&
+  modelKey(f12br.model) === "opencode/muse-spark-1.3-contributor-free" &&
     toasts.slice(f12bMark).filter((t) => t.indexOf('"auto" in') !== -1).length === 1,
   "F: an all-blank role list is treated as a typo and warns once",
 );
@@ -674,7 +704,7 @@ await freeAuto(f13);
 const f13r = await routeOnce(f13, "untagged explore turn", { agent: "explore" });
 const f13Warn = toasts.slice(f13Mark).filter((t) => t.indexOf("can never route") !== -1 && t.indexOf("title") !== -1);
 check(
-  modelKey(f13r.model) === "opencode/mimo-v2.6-flash-free" && f13Warn.length === 1,
+  modelKey(f13r.model) === "opencode/muse-spark-1.3-contributor-free" && f13Warn.length === 1,
   "F: an unroutable role warns once by name and the remaining roles still route",
 );
 // F14: project auto.roles beats the global list, which applies when no project file does.
@@ -696,17 +726,21 @@ await withGlobalConfig(globalAutoOracle, async () => {
   const po = await routeOnce(f14b, "untagged oracle turn", { agent: "oracle" });
   check(modelKey(po.model) === modelKey(PAID), "F: the overridden global role no longer routes");
 });
-// F15: the status lines name the allowlist and drop the old "reserved" wording.
+// F15: the status lines name the full allowlist and drop the old "reserved" wording.
 const f15 = autoSid("status");
 const f15On = await freeAuto(f15);
 check(
-  f15On.indexOf("Auto routes free for: explore") !== -1 && f15On.indexOf("reserved") === -1,
+  f15On.indexOf("Auto routes free for: explore, explorer, librarian, research.") !== -1 &&
+    f15On.indexOf("reserved") === -1,
   "F: /free auto names the active roles and no longer says reserved",
 );
 const f15Out: ChainOut = { parts: [] };
 await hooks["command.execute.before"]({ command: "free", sessionID: f15, arguments: "" }, f15Out);
 const f15Text = String((f15Out.parts[0] as { text?: unknown } | undefined)?.text ?? "");
-check(f15Text.indexOf("Auto routes free for: explore") !== -1, "F: the no-arg status in auto names the allowlist");
+check(
+  f15Text.indexOf("Auto routes free for: explore, explorer, librarian, research.") !== -1,
+  "F: the no-arg status in auto names the allowlist",
+);
 const f15Off = autoSid("status-off");
 await freeOff(f15Off);
 const f15OffOut: ChainOut = { parts: [] };
@@ -729,6 +763,41 @@ await freeAuto(f17);
 await freeOff(f17);
 const f17r = await routeOnce(f17, "untagged explore turn", { agent: "explore" });
 check(modelKey(f17r.model) === modelKey(PAID), "F: /free off after auto leaves explore on the paid model");
+
+// F18-F20: the widened default allowlist covers OMO slim's research agents too.
+// Each fresh session enters auto and then takes its OWN untagged chat.message
+// turn on an otherwise unconfigured project, which is how a slim subagent is
+// routed (slim delegates through the native task tool, which is never stamped).
+const f18 = autoSid("slim-explorer");
+await freeAuto(f18);
+const f18r = await routeOnce(f18, "untagged explorer turn", { agent: "explorer" });
+check(
+  modelKey(f18r.model) === "opencode/muse-spark-1.3-contributor-free" && isFreeId(f18r.model.modelID),
+  "F: auto routes an untagged explorer turn to the research default",
+);
+const f19 = autoSid("slim-librarian");
+await freeAuto(f19);
+const f19r = await routeOnce(f19, "untagged librarian turn", { agent: "librarian" });
+check(
+  modelKey(f19r.model) === "opencode/muse-spark-1.3-contributor-free" && isFreeId(f19r.model.modelID),
+  "F: auto routes an untagged librarian turn to the research default",
+);
+const f20 = autoSid("research-family");
+await freeAuto(f20);
+const f20r = await routeOnce(f20, "untagged research turn", { agent: "research" });
+check(
+  modelKey(f20r.model) === "opencode/muse-spark-1.3-contributor-free" && isFreeId(f20r.model.modelID),
+  "F: auto routes an untagged research turn to the research default",
+);
+// F21: the widened allowlist is still a gate, not a blanket: a role outside the
+// research family stays on the paid model under auto with no explicit tag.
+const f21 = autoSid("build-still-paid");
+await freeAuto(f21);
+const f21r = await routeOnce(f21, "untagged build turn", { agent: "build" });
+check(
+  modelKey(f21r.model) === modelKey(PAID),
+  "F: auto still leaves a non-research role such as build on the paid model",
+);
 
 console.log(`${pass} pass ${fail} fail`);
 process.exit(fail ? 1 : 0);
