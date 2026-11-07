@@ -2,7 +2,7 @@
 // (the plugin exposes exactly ONE export, so the suite drives the default export's
 // hook surface with a stub ctx/client); section 2 = hook-level 429 failover;
 // section 3 = parentID mode inheritance. Run: bun test/smoke.test.ts.
-import pluginFn from "../free-model-router";
+import plugin from "../free-model-router";
 import { readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -50,7 +50,7 @@ const ctx = {
   },
 };
 
-const hooks = await pluginFn(ctx as unknown as Parameters<typeof pluginFn>[0]);
+const hooks = await plugin.server(ctx);
 
 const modelKey = (m: { providerID: string; modelID: string }): string => `${m.providerID}/${m.modelID}`;
 
@@ -96,19 +96,19 @@ check(bare.text === "" && modelKey(bare.model) === "opencode/mimo-v2.6-flash-fre
 const anyPick = await routeOnce("p-pick", "@free ping");
 check(modelKey(anyPick.model) !== modelKey(PAID) && isFreeId(anyPick.model.modelID), "pickFree returns a pick");
 
-const pref = await routeOnce("p-pref", "@free ling-3.0-flash-fin-free x");
-check(pref.model.modelID === "ling-3.0-flash-fin-free", "pickFree honors preferredId");
+const pref = await routeOnce("p-pref", "@free crouton-alpha-free x");
+check(pref.model.modelID === "crouton-alpha-free", "pickFree honors preferredId");
 
-const pin = await routeOnce("p-pinf", "@free opencode-go/space-bunny-free x");
-check(pin.model.providerID === "opencode-go" && pin.model.modelID === "space-bunny-free", "pickFree provider-qualified pin");
+const pin = await routeOnce("p-pinf", "@free opencode-go/iceman-contributor-free x");
+check(pin.model.providerID === "opencode-go" && pin.model.modelID === "iceman-contributor-free", "pickFree provider-qualified pin");
 
-// Project policy zdr-only: a non-ZDR request must fall through to a ZDR-safe id.
+// Project policy zdr-only: a blocked (trainer) pin must fall through to a ZDR-safe id.
 sessionDirs.set("p-zdr", join(PROJ, "fixtures", "zdr-only"));
-const zdr = await routeOnce("p-zdr", "@free muse-spark-1.3-contributor-free x");
-check(["opencode/space-bunny-free", "opencode/longcat-2.5-preview-free", "opencode-go/space-bunny-free", "opencode-go/longcat-2.5-preview-free"].includes(modelKey(zdr.model)), "zdrOnly restricts to ZDR-safe ids");
+const zdr = await routeOnce("p-zdr", "@free mimo-v2.6-flash-free x");
+check(["opencode/beam-free", "opencode/crouton-alpha-free", "opencode/deepseek-v4.1-flash-free", "opencode/flint-40b-free", "opencode/glm-5.3-flash-free", "opencode/iceman-free", "opencode/inkling-2-small-free", "opencode-go/beam-free", "opencode-go/crouton-alpha-free", "opencode-go/iceman-contributor-free"].includes(modelKey(zdr.model)), "zdrOnly restricts to ZDR-safe ids");
 
-const allMode = await routeOnce("p-all", "@free muse-spark-1.3-contributor-free x");
-check(allMode.model.modelID === "muse-spark-1.3-contributor-free", "zdrOnly false = all mode");
+const allMode = await routeOnce("p-all", "@free mimo-v2.6-flash-free x");
+check(allMode.model.modelID === "mimo-v2.6-flash-free", "zdrOnly false = all mode");
 
 // NextCandidate returns null once every scoped (ZDR-safe) id is in failedIds,
 // and that null is what restores the paid model -- assert on that outcome.
@@ -128,8 +128,8 @@ check(zdrExhausted === modelKey(PAID), "zdrOnly with no safe id left -> no free 
 const stripped = await routeOnce("p-strip", "@free do it");
 check(stripped.text === "do it", "parseFreeTag strips tag");
 
-const captured = await routeOnce("p-caps", "@free jev-1.13-free now");
-check(captured.text === "now" && captured.model.modelID === "jev-1.13-free", "parseFreeTag captures free id");
+const captured = await routeOnce("p-caps", "@free iceman-free now");
+check(captured.text === "now" && captured.model.modelID === "iceman-free", "parseFreeTag captures free id");
 
 const noop = await routeOnce("p-noop", "no tag here");
 check(noop.text === "no tag here" && modelKey(noop.model) === modelKey(PAID), "parseFreeTag no-op without tag");
@@ -146,10 +146,10 @@ check(isFreeId(a2.model.modelID), "A: the failover candidate is still free");
 check(a2.text === "ping", "A: tag stripped on the failover turn too");
 
 // The failover walk restarts at the first pinned entry, then steps forward.
-check(modelKey(a2.model) === "opencode/jev-1.13-free", "nextCandidate first pick");
+check(modelKey(a2.model) === "opencode/beam-free", "nextCandidate first pick");
 await toolAfter(sidA, "HTTP 429 Too Many Requests");
 const a3 = await routeOnce(sidA, "@free ping");
-check(a3.model.modelID === "muse-spark-1.3-contributor-free" && modelKey(a3.model) !== modelKey(a2.model), "nextCandidate excludes failed id");
+check(modelKey(a3.model) === "opencode/big-pickle" && modelKey(a3.model) !== modelKey(a2.model), "nextCandidate excludes failed id");
 
 let exhausted: string | null = null;
 for (let i = 0; i < 25; i++) {
@@ -254,12 +254,12 @@ check(modelKey(childF1.model) === modelKey(fParent1.model), "E: child does not i
 
 // ---- Section 4: prefer (global + project, merged per role) -----------------
 // Fixture ids must exist in the plugin's PINNED catalog: prefer-ids use
-// opencode/mimo-v2.5-free and opencode-go/space-bunny-free and
-// opencode-go/longcat-2.5-preview-free. Every message carries the bare
+// opencode/beam-free and opencode-go/crouton-alpha-free and
+// opencode-go/iceman-contributor-free. Every message carries the bare
 // "@free" tag so the tag parser cannot also capture a requestedId pin.
 const GLOBAL_DIR = join(PROJ, "fixtures", "prefer-global");
 const globalRoles = join(GLOBAL_DIR, "free-model-router.json"); // {"prefer":{"research":...}}
-const globalBlanket = join(GLOBAL_DIR, "blanket.json"); // {"prefer":"opencode/jev-1.13-free"}
+const globalBlanket = join(GLOBAL_DIR, "blanket.json"); // {"prefer":"opencode/flint-40b-free"}
 const globalEdit = join(GLOBAL_DIR, "edit.json"); // rewritten mid-test, then restored
 
 // The global path is read at call time inside getPolicy, so the override has
@@ -284,26 +284,26 @@ const preferBadDir = join(PROJ, "fixtures", "prefer-badjson");
 const strDir = "prefer-string-sid";
 sessionDirs.set(strDir, preferStringDir);
 const pString = await routeOnce(strDir, "@free say hi", { agent: "general" });
-check(modelKey(pString.model) === "opencode/mimo-v2.5-free", "D: a string prefer routes to that model");
+check(modelKey(pString.model) === "opencode/crouton-alpha-free", "D: a string prefer routes to that model");
 
 const listDir = "prefer-list-sid";
 sessionDirs.set(listDir, preferListDir);
 const pList = await routeOnce(listDir, "@free say hi", { agent: "general" });
 check(
-  modelKey(pList.model) === "opencode/mimo-v2.5-free",
+  modelKey(pList.model) === "opencode/beam-free",
   "D: an ordered prefer list routes to its first entry",
 );
 
 const rolesResearch = "prefer-roles-research";
 sessionDirs.set(rolesResearch, preferRolesDir);
 const pRole = await routeOnce(rolesResearch, "@free say hi", { agent: "research" });
-check(modelKey(pRole.model) === "opencode-go/space-bunny-free", "D: a per-role prefer applies to that role");
+check(modelKey(pRole.model) === "opencode-go/crouton-alpha-free", "D: a per-role prefer applies to that role");
 
 const rolesCode = "prefer-roles-code";
 sessionDirs.set(rolesCode, preferRolesDir);
 const pRoleDefault = await routeOnce(rolesCode, "@free say hi", { agent: "code" });
 check(
-  modelKey(pRoleDefault.model) === "opencode/mimo-v2.5-free",
+  modelKey(pRoleDefault.model) === "opencode/beam-free",
   "D: a per-role default applies to an unnamed role",
 );
 
@@ -316,21 +316,21 @@ sessionDirs.set(slimExplorer, preferSlimDir);
 const slimWarnMark = toasts.length;
 const pSlimExplorer = await routeOnce(slimExplorer, "@free say hi", { agent: "explorer" });
 check(
-  modelKey(pSlimExplorer.model) === "opencode/muse-spark-1.3-contributor-free",
+  modelKey(pSlimExplorer.model) === "opencode/deepseek-v4.1-flash-free",
   "D: a per-role prefer for the slim explorer name applies",
 );
 const slimLibrarian = "prefer-slim-librarian";
 sessionDirs.set(slimLibrarian, preferSlimDir);
 const pSlimLibrarian = await routeOnce(slimLibrarian, "@free say hi", { agent: "librarian" });
 check(
-  modelKey(pSlimLibrarian.model) === "opencode/muse-spark-1.3-contributor-free",
+  modelKey(pSlimLibrarian.model) === "opencode/deepseek-v4.1-flash-free",
   "D: a per-role prefer for the slim librarian name applies",
 );
 const slimOther = "prefer-slim-other";
 sessionDirs.set(slimOther, preferSlimDir);
 const pSlimOther = await routeOnce(slimOther, "@free say hi", { agent: "general" });
 check(
-  modelKey(pSlimOther.model) === "opencode/space-bunny-free",
+  modelKey(pSlimOther.model) === "opencode/crouton-alpha-free",
   "D: the catch-all prefer still answers a role the slim entries do not name",
 );
 const slimWarns = toasts.slice(slimWarnMark).filter((t) => t.indexOf("unknown role") !== -1);
@@ -344,14 +344,14 @@ await withGlobalConfig(globalRoles, async () => {
   sessionDirs.set(gResearch, preferStringDir);
   const r1 = await routeOnce(gResearch, "@free say hi", { agent: "research" });
   check(
-    modelKey(r1.model) === "opencode-go/longcat-2.5-preview-free",
+    modelKey(r1.model) === "opencode-go/crouton-alpha-free",
     "D: a global named role wins over a project blanket prefer",
   );
   const gGeneral = "prefer-global-general";
   sessionDirs.set(gGeneral, preferStringDir);
   const r2 = await routeOnce(gGeneral, "@free say hi", { agent: "general" });
   check(
-    modelKey(r2.model) === "opencode/mimo-v2.5-free",
+    modelKey(r2.model) === "opencode/crouton-alpha-free",
     "D: a project blanket prefer still answers roles the global does not name",
   );
 });
@@ -361,7 +361,7 @@ await withGlobalConfig(globalBlanket, async () => {
   sessionDirs.set(bothGeneral, preferListDir);
   const r = await routeOnce(bothGeneral, "@free say hi", { agent: "general" });
   check(
-    modelKey(r.model) === "opencode/mimo-v2.5-free",
+    modelKey(r.model) === "opencode/beam-free",
     "D: a project prefer beats a global prefer for the same role",
   );
 });
@@ -372,16 +372,16 @@ await withGlobalConfig(globalBlanket, async () => {
 // pass or fail on filesystem timestamp granularity.
 const globalEditOriginal = readFileSync(globalEdit, "utf8");
 await withGlobalConfig(globalEdit, async () => {
-  writeFileSync(globalEdit, '{"prefer":"opencode/mimo-v2.5-free"}');
+  writeFileSync(globalEdit, '{"prefer":"opencode/beam-free"}');
   const editSid = "prefer-global-edit";
   const e1 = await routeOnce(editSid, "@free say hi");
-  writeFileSync(globalEdit, '{"prefer":"opencode/jev-1.13-free"}');
+  writeFileSync(globalEdit, '{"prefer":"opencode/flint-40b-free"}');
   const future = Date.now() / 1000 + 5;
   utimesSync(globalEdit, future, future);
   const e2 = await routeOnce(editSid, "@free say hi");
   check(
-    modelKey(e1.model) === "opencode/mimo-v2.5-free" &&
-      modelKey(e2.model) === "opencode/jev-1.13-free" &&
+    modelKey(e1.model) === "opencode/beam-free" &&
+      modelKey(e2.model) === "opencode/flint-40b-free" &&
       modelKey(e1.model) !== modelKey(e2.model),
     "D: an edited global config takes effect on the next message",
   );
@@ -416,7 +416,7 @@ const markUnknown = toasts.length;
 const pUnknown = await routeOnce(unknownFirst, "@free say hi", { agent: "general" });
 const unknownWarns = toasts.slice(markUnknown).filter((t) => t.includes("nope-9-free"));
 check(
-  modelKey(pUnknown.model) === "opencode-go/space-bunny-free",
+  modelKey(pUnknown.model) === "opencode-go/crouton-alpha-free",
   "D: an unknown prefer id is skipped for the next entry",
 );
 check(unknownWarns.length === 1, "D: an unknown prefer id warns exactly once");
@@ -451,14 +451,14 @@ check(
 const dup = "cand-dup";
 sessionDirs.set(dup, dupDir);
 const pDup = await routeOnce(dup, "@free say hi", { agent: "general" });
-check(modelKey(pDup.model) === "opencode/mimo-v2.5-free", "D: duplicate and bare/qualified ids resolve to one candidate");
+check(modelKey(pDup.model) === "opencode/beam-free", "D: duplicate and bare/qualified ids resolve to one candidate");
 
 // zdr-only drops the configured non-safe entry and keeps the safe one.
 const zdrPref = "cand-zdr";
 sessionDirs.set(zdrPref, zdrPrefDir);
 const pZdr = await routeOnce(zdrPref, "@free say hi", { agent: "general" });
 check(
-  modelKey(pZdr.model) === "opencode-go/space-bunny-free",
+  modelKey(pZdr.model) === "opencode-go/crouton-alpha-free",
   "D: zdr-only keeps only safe models from the configured list",
 );
 // zdr-only discarding a CONFIGURED entry is a silent preference loss unless the plugin
@@ -468,7 +468,7 @@ sessionDirs.set(zdrDropped, zdrPrefDir);
 const markDropped = toasts.length;
 await routeOnce(zdrDropped, "@free say hi", { agent: "general" });
 check(
-  toasts.slice(markDropped).filter((t) => t.includes("mimo-v2.5-free")).length === 1,
+  toasts.slice(markDropped).filter((t) => t.includes("mimo-v2.6-flash-free")).length === 1,
   "D: zdr-only names a configured model it dropped",
 );
 
@@ -478,12 +478,12 @@ check(
 const pinSid = "cand-pin";
 sessionDirs.set(pinSid, preferStringDir);
 await hooks["command.execute.before"](
-  { command: "free", sessionID: pinSid, arguments: "opencode/longcat-2.5-preview-free" },
+  { command: "free", sessionID: pinSid, arguments: "opencode/flint-40b-free" },
   { parts: [] },
 );
 const pPin = await routeOnce(pinSid, "@free say hi", { agent: "general" });
 check(
-  modelKey(pPin.model) === "opencode/longcat-2.5-preview-free",
+  modelKey(pPin.model) === "opencode/flint-40b-free",
   "D: a /free pin prepends to the configured prefer list",
 );
 
@@ -491,13 +491,13 @@ check(
 sessionDirs.set("fail-pref", join(PROJ, "fixtures", "prefer-failover"));
 const fp1 = await routeOnce("fail-pref", "@free say hi");
 check(
-  modelKey(fp1.model) === "opencode/jev-1.13-free",
+  modelKey(fp1.model) === "opencode/beam-free",
   "D: the first configured preference is picked over the built-in default",
 );
 await toolAfter("fail-pref", "HTTP 429 Too Many Requests");
 const fp2 = await routeOnce("fail-pref", "@free say hi");
 check(
-  modelKey(fp2.model) === "opencode-go/longcat-2.5-preview-free",
+  modelKey(fp2.model) === "opencode-go/crouton-alpha-free",
   "D: failover follows the configured preferences",
 );
 
@@ -509,7 +509,7 @@ sessionDirs.set("fail-pin", join(PROJ, "fixtures", "prefer-failover"));
 const fpToastMark = toasts.length;
 const fp3 = await routeOnce("fail-pin", "@free nope-9-free say hi");
 check(
-  modelKey(fp3.model) === "opencode/jev-1.13-free",
+  modelKey(fp3.model) === "opencode/beam-free",
   "D: a pin naming an unknown model leaves the chain unchanged",
 );
 check(
@@ -522,7 +522,7 @@ const chainSid = "chain-1";
 sessionDirs.set(chainSid, join(PROJ, "fixtures", "prefer-failover"));
 await freeOn(chainSid);
 await hooks["command.execute.before"](
-  { command: "free", sessionID: chainSid, arguments: "opencode/mimo-v2.5-free" },
+  { command: "free", sessionID: chainSid, arguments: "opencode/flint-40b-free" },
   { parts: [] },
 );
 type ChainOut = Parameters<typeof hooks["command.execute.before"]>[1];
@@ -537,7 +537,7 @@ check(
   "E: the no-arg reply keeps the usage line",
 );
 check(
-  chainText.indexOf("1. opencode/mimo-v2.5-free (pin)") !== -1,
+  chainText.indexOf("1. opencode/flint-40b-free (pin)") !== -1,
   "E: the pin is listed first and labelled pin",
 );
 check(
@@ -585,7 +585,7 @@ const f1 = autoSid("explore");
 await freeAuto(f1);
 const f1r = await routeOnce(f1, "untagged explore turn", { agent: "explore" });
 check(
-  modelKey(f1r.model) === "opencode/muse-spark-1.3-contributor-free" && isFreeId(f1r.model.modelID),
+  modelKey(f1r.model) === "opencode/deepseek-v4.1-flash-free" && isFreeId(f1r.model.modelID),
   "F: auto routes an untagged explore turn to the explore default",
 );
 // F2/F3: a non-allowlisted role, and the empty-agent fallback (general), both stay paid.
@@ -605,25 +605,25 @@ check(
 const f5 = autoSid("pin-wins");
 await freeAuto(f5);
 await hooks["command.execute.before"](
-  { command: "free", sessionID: f5, arguments: "opencode/jev-1.13-free" },
+  { command: "free", sessionID: f5, arguments: "opencode/flint-40b-free" },
   { parts: [] },
 );
 const f5r = await routeOnce(f5, "untagged build turn", { agent: "build" });
 check(
-  modelKey(f5r.model) === "opencode/jev-1.13-free",
+  modelKey(f5r.model) === "opencode/flint-40b-free",
   "F: /free <model-id> leaves auto and pins the model for every role",
 );
 // F6: entering auto must clear a pin recorded earlier, or it would outrank the role default.
 const f6 = autoSid("stale-pin");
 await freeAuto(f6);
 await hooks["command.execute.before"](
-  { command: "free", sessionID: f6, arguments: "opencode/jev-1.13-free" },
+  { command: "free", sessionID: f6, arguments: "opencode/flint-40b-free" },
   { parts: [] },
 );
 await freeAuto(f6);
 const f6r = await routeOnce(f6, "untagged explore turn", { agent: "explore" });
 check(
-  modelKey(f6r.model) === "opencode/muse-spark-1.3-contributor-free",
+  modelKey(f6r.model) === "opencode/deepseek-v4.1-flash-free",
   "F: /free auto clears a stale pin so the role default wins",
 );
 // F7: children inherit auto and are judged on their OWN role.
@@ -683,7 +683,7 @@ await freeAuto(f12);
 const f12r = await routeOnce(f12, "untagged explore turn", { agent: "explore" });
 const f12Warn = toasts.slice(f12Mark).filter((t) => t.indexOf('"auto" in') !== -1);
 check(
-  modelKey(f12r.model) === "opencode/muse-spark-1.3-contributor-free" && f12Warn.length === 1,
+  modelKey(f12r.model) === "opencode/deepseek-v4.1-flash-free" && f12Warn.length === 1,
   "F: a malformed auto block warns exactly once and uses the default roles",
 );
 const f12bMark = toasts.length;
@@ -692,7 +692,7 @@ sessionDirs.set(f12b, autoDir("auto-blank")); // {"auto":{"roles":[" "]}}
 await freeAuto(f12b);
 const f12br = await routeOnce(f12b, "untagged explore turn", { agent: "explore" });
 check(
-  modelKey(f12br.model) === "opencode/muse-spark-1.3-contributor-free" &&
+  modelKey(f12br.model) === "opencode/deepseek-v4.1-flash-free" &&
     toasts.slice(f12bMark).filter((t) => t.indexOf('"auto" in') !== -1).length === 1,
   "F: an all-blank role list is treated as a typo and warns once",
 );
@@ -704,7 +704,7 @@ await freeAuto(f13);
 const f13r = await routeOnce(f13, "untagged explore turn", { agent: "explore" });
 const f13Warn = toasts.slice(f13Mark).filter((t) => t.indexOf("can never route") !== -1 && t.indexOf("title") !== -1);
 check(
-  modelKey(f13r.model) === "opencode/muse-spark-1.3-contributor-free" && f13Warn.length === 1,
+  modelKey(f13r.model) === "opencode/deepseek-v4.1-flash-free" && f13Warn.length === 1,
   "F: an unroutable role warns once by name and the remaining roles still route",
 );
 // F14: project auto.roles beats the global list, which applies when no project file does.
@@ -772,21 +772,21 @@ const f18 = autoSid("slim-explorer");
 await freeAuto(f18);
 const f18r = await routeOnce(f18, "untagged explorer turn", { agent: "explorer" });
 check(
-  modelKey(f18r.model) === "opencode/muse-spark-1.3-contributor-free" && isFreeId(f18r.model.modelID),
+  modelKey(f18r.model) === "opencode/deepseek-v4.1-flash-free" && isFreeId(f18r.model.modelID),
   "F: auto routes an untagged explorer turn to the research default",
 );
 const f19 = autoSid("slim-librarian");
 await freeAuto(f19);
 const f19r = await routeOnce(f19, "untagged librarian turn", { agent: "librarian" });
 check(
-  modelKey(f19r.model) === "opencode/muse-spark-1.3-contributor-free" && isFreeId(f19r.model.modelID),
+  modelKey(f19r.model) === "opencode/deepseek-v4.1-flash-free" && isFreeId(f19r.model.modelID),
   "F: auto routes an untagged librarian turn to the research default",
 );
 const f20 = autoSid("research-family");
 await freeAuto(f20);
 const f20r = await routeOnce(f20, "untagged research turn", { agent: "research" });
 check(
-  modelKey(f20r.model) === "opencode/muse-spark-1.3-contributor-free" && isFreeId(f20r.model.modelID),
+  modelKey(f20r.model) === "opencode/deepseek-v4.1-flash-free" && isFreeId(f20r.model.modelID),
   "F: auto routes an untagged research turn to the research default",
 );
 // F21: the widened allowlist is still a gate, not a blanket: a role outside the
@@ -798,6 +798,259 @@ check(
   modelKey(f21r.model) === modelKey(PAID),
   "F: auto still leaves a non-research role such as build on the paid model",
 );
+
+// ---- Section F-headless: V1 without a TUI client logs via console.warn ----
+// Headless hosts (opencode run) have no client.tui: notices must still be
+// visible with --print-logs instead of vanishing silently.
+const warnLines: string[] = [];
+const origWarn = console.warn;
+console.warn = (...args: unknown[]) => {
+  warnLines.push(args.map(String).join(" "));
+};
+try {
+  const ctxNoTui = {
+    directory: PROJ,
+    client: {
+      session: {
+        get: async (a: { path?: { id?: string } }): Promise<{ data: { id?: string; directory?: string; parentID?: string } }> => {
+          const id = String(a?.path?.id ?? "");
+          return { data: { id, directory: sessionDirs.get(id) ?? PROJ, parentID: sessionParents.get(id) } };
+        },
+      },
+    },
+  };
+  const hooksNoTui = await plugin.server(ctxNoTui as any);
+  sessionDirs.set("headless-warn", autoDir("auto-bad")); // {"auto":{"roles":"explore"}}
+  await hooksNoTui["command.execute.before"](
+    { command: "free", sessionID: "headless-warn", arguments: "auto" },
+    { parts: [] },
+  );
+  const hwOut = {
+    message: { model: { providerID: PAID.providerID, modelID: PAID.modelID } },
+    parts: [{ type: "text", text: "untagged explore turn" }],
+  };
+  await hooksNoTui["chat.message"]({ sessionID: "headless-warn", agent: "explore" }, hwOut);
+} finally {
+  console.warn = origWarn;
+}
+check(
+  warnLines.some((l) => l.indexOf("[free-model-router]") !== -1 && l.indexOf('"auto"') !== -1),
+  "F: headless V1 without a TUI client falls back to console.warn",
+);
+
+// ---- Section G: V2 dual entrypoint ----------------------------------------
+// The V2 context is a fake host: session.get/switchModel/synthetic and the
+// hook/transform registrars are captured so the suite can drive the exact
+// events V2 emits. Catalog sources are still offline (pinned list).
+interface V2FakeSession {
+  id: string;
+  parentID?: string;
+  agent: string;
+  model: { providerID: string; id: string; variant?: string };
+  location: { directory: string };
+}
+
+const v2Sessions = new Map<string, V2FakeSession>();
+const v2SwitchCalls: Array<{ sessionID: string; model: { providerID: string; id: string } }> = [];
+const v2Synthetics: Array<{ sessionID: string; text: string; resume?: boolean }> = [];
+const v2Hooks = new Map<string, (event: any) => Promise<void> | void>();
+const v2ToolHooks = new Map<string, (event: any) => Promise<void> | void>();
+let v2Command: any = null;
+let v2Disposed = 0;
+
+function v2Session(id: string, agent = "build", parentID?: string): V2FakeSession {
+  const s: V2FakeSession = {
+    id,
+    parentID,
+    agent,
+    model: { providerID: PAID.providerID, id: PAID.modelID },
+    location: { directory: PROJ },
+  };
+  v2Sessions.set(id, s);
+  return s;
+}
+
+const v2ctx = {
+  location: { directory: PROJ },
+  session: {
+    get: async ({ sessionID }: { sessionID: string }) => {
+      const s = v2Sessions.get(sessionID) ?? v2Session(sessionID);
+      return { data: s };
+    },
+    switchModel: async (input: any) => {
+      v2SwitchCalls.push(input);
+      const s = v2Sessions.get(input.sessionID);
+      if (s) s.model = { ...input.model };
+    },
+    synthetic: async (input: any) => {
+      v2Synthetics.push(input);
+    },
+    hook: async (name: string, cb: any) => {
+      v2Hooks.set(name, cb);
+      return { dispose: async () => { v2Disposed++; } };
+    },
+  },
+  tool: {
+    hook: async (name: string, cb: any) => {
+      v2ToolHooks.set(name, cb);
+      return { dispose: async () => { v2Disposed++; } };
+    },
+  },
+  command: {
+    transform: async (cb: any) => {
+      cb({ add: (def: any) => { v2Command = def; } });
+      return { dispose: async () => { v2Disposed++; } };
+    },
+  },
+};
+
+const v2cleanup = await plugin.setup(v2ctx as any);
+check(v2Disposed === 0, "G: V2 setup registers without disposing");
+check(typeof v2Hooks.get("prompt") === "function", "G: V2 prompt hook registered");
+check(typeof v2Hooks.get("experimental.idle") === "function", "G: V2 idle hook registered");
+check(typeof v2Hooks.get("retry") === "function", "G: V2 retry hook registered");
+check(typeof v2ToolHooks.get("execute.before") === "function", "G: V2 tool-before hook registered");
+check(typeof v2ToolHooks.get("execute.after") === "function", "G: V2 tool-after hook registered");
+check(v2Command?.name === "free", "G: V2 native free command registered");
+
+// G1: a one-shot @free tag switches the session model in the prompt hook, and
+// the idle hook restores the paid model after the turn.
+v2Session("v2-tag");
+const g1prompt = { text: "@free hello" };
+await v2Hooks.get("prompt")!({ sessionID: "v2-tag", prompt: g1prompt });
+check(g1prompt.text === "hello", "G: V2 prompt hook strips @free");
+const g1calls = v2SwitchCalls.filter((c) => c.sessionID === "v2-tag");
+check(
+  g1calls.length === 1 && isFreeId(g1calls[0].model.id),
+  "G: V2 prompt hook switches the current turn to free",
+);
+check(
+  v2Sessions.get("v2-tag")!.model.id === g1calls[0].model.id,
+  "G: V2 session model is updated before admission",
+);
+await v2Hooks.get("experimental.idle")!({ sessionID: "v2-tag", background: [] });
+check(
+  v2Sessions.get("v2-tag")!.model.providerID === PAID.providerID &&
+    v2Sessions.get("v2-tag")!.model.id === PAID.modelID,
+  "G: V2 idle restores the paid model after a one-shot tag",
+);
+
+// G2: the native /free command sets mode and reports via synthetic; the next
+// prompt routes, and /free off restores the paid model immediately.
+v2Session("v2-cmd");
+await v2Command.execute({ sessionID: "v2-cmd", prompt: { text: "on" } });
+check(
+  v2Synthetics.some((s) => s.sessionID === "v2-cmd" && s.text.includes("free mode: on")),
+  "G: V2 native /free on reports its status",
+);
+const g2prompt = { text: "plain turn" };
+await v2Hooks.get("prompt")!({ sessionID: "v2-cmd", prompt: g2prompt });
+check(
+  isFreeId(v2Sessions.get("v2-cmd")!.model.id),
+  "G: V2 /free on routes the next untagged turn",
+);
+await v2Command.execute({ sessionID: "v2-cmd", prompt: { text: "off" } });
+check(
+  v2Sessions.get("v2-cmd")!.model.providerID === PAID.providerID &&
+    v2Sessions.get("v2-cmd")!.model.id === PAID.modelID,
+  "G: V2 native /free off restores the paid model",
+);
+
+// G3: opencode run sends slash commands as literal prompt text; the prompt hook
+// must recognize /free so the CLI has the same command surface.
+v2Session("v2-cli", "explore");
+const g3prompt = { text: "/free auto" };
+await v2Hooks.get("prompt")!({ sessionID: "v2-cli", prompt: g3prompt });
+check(
+  g3prompt.text.includes("free mode: auto"),
+  "G: V2 prompt hook handles literal /free text for opencode run",
+);
+const g3turn = { text: "untagged explore turn" };
+await v2Hooks.get("prompt")!({ sessionID: "v2-cli", prompt: g3turn });
+check(
+  isFreeId(v2Sessions.get("v2-cli")!.model.id),
+  "G: CLI /free auto routes an allowlisted role",
+);
+
+// PowerShell's native-argument shim can pass the prompt with its quotes still
+// attached. The command fallback must unwrap them.
+v2Session("v2-cli-quoted", "explore");
+const g3quoted = { text: "\"/free auto\"" };
+await v2Hooks.get("prompt")!({ sessionID: "v2-cli-quoted", prompt: g3quoted });
+check(
+  g3quoted.text.includes("free mode: auto"),
+  "G: literal /free is recognized when the prompt arrives quoted",
+);
+
+// G4: a 429 in the retry hook records the failed free id and moves the session
+// to the next candidate while a candidate remains.
+v2Session("v2-retry");
+await v2Hooks.get("prompt")!({ sessionID: "v2-retry", prompt: { text: "@free retry" } });
+const g4first = v2Sessions.get("v2-retry")!.model.id;
+const g4decision = { retry: true };
+await v2Hooks.get("retry")!({
+  sessionID: "v2-retry",
+  model: { providerID: "opencode", id: g4first },
+  error: { type: "FreeUsageLimitError", message: "429", status: 429 },
+  attempt: 1,
+  decision: g4decision,
+});
+const g4second = v2Sessions.get("v2-retry")!.model.id;
+check(
+  g4second !== g4first && isFreeId(g4second),
+  "G: V2 retry hook advances to another free candidate on 429",
+);
+check(g4decision.retry === true, "G: V2 retry hook keeps retrying while a candidate remains");
+
+// G5: auto mode stamps an allowlisted delegation, exactly like V1.
+v2Session("v2-tool");
+await v2Command.execute({ sessionID: "v2-tool", prompt: { text: "auto" } });
+const g5input: any = { subagent_type: "explore" };
+await v2ToolHooks.get("execute.before")!({
+  tool: "delegate_task",
+  sessionID: "v2-tool",
+  input: g5input,
+});
+check(
+  g5input.model !== undefined && isFreeId(g5input.model.modelID),
+  "G: V2 tool-before stamps an allowlisted delegation",
+);
+
+// G6: a rate-limit tool error advances the session chain.
+v2Session("v2-tool-after");
+await v2Hooks.get("prompt")!({ sessionID: "v2-tool-after", prompt: { text: "@free x" } });
+const g6first = v2Sessions.get("v2-tool-after")!.model.id;
+await v2ToolHooks.get("execute.after")!({
+  tool: "delegate_task",
+  sessionID: "v2-tool-after",
+  status: "error",
+  error: { message: "429 rate limit" },
+});
+const g6second = v2Sessions.get("v2-tool-after")!.model.id;
+check(
+  g6second !== g6first && isFreeId(g6second),
+  "G: V2 tool-after 429 advances the session chain",
+);
+
+// G6b: concurrent admissions race: the newer prompt owns the model switch,
+// but both tags are still stripped (sync) before either hook awaits.
+v2Session("v2-race");
+const r1 = { text: "@free first" };
+const r2 = { text: "@free second" };
+const raceBase = v2SwitchCalls.filter((c) => c.sessionID === "v2-race").length;
+await Promise.all([
+  v2Hooks.get("prompt")!({ sessionID: "v2-race", prompt: r1 }),
+  v2Hooks.get("prompt")!({ sessionID: "v2-race", prompt: r2 }),
+]);
+check(r1.text === "first" && r2.text === "second", "G: concurrent prompts both strip @free");
+check(
+  v2SwitchCalls.filter((c) => c.sessionID === "v2-race").length - raceBase === 1,
+  "G: concurrent prompts switch the session model exactly once",
+);
+
+// G7: setup returns a cleanup that disposes every registration.
+await v2cleanup();
+check(v2Disposed === 6, "G: V2 cleanup disposes all six registrations");
 
 console.log(`${pass} pass ${fail} fail`);
 process.exit(fail ? 1 : 0);

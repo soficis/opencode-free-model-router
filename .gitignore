@@ -49,12 +49,15 @@ coverage/
 
 # Development, Agent & Scratch Artifacts
 /.opencode/
+/free-model-router.json
 .anchor/
 .superpowers/
 .omo/
+.codegraph/
 docs/
 *discussion*.md
 *plan*.md
+test/vm-*
 scratch/
 tmp/
 temp/

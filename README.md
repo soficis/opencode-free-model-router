@@ -4,6 +4,8 @@ Your OpenCode bill can drop to zero for the boring work.
 
 This [OpenCode](https://opencode.ai) plugin sends chat turns to free-tier models from the **opencode** (Zen) and **opencode-go** providers. When a free model hits a 429 rate limit, the plugin tries the next one. When the free quota runs out, your paid model takes over.
 
+One file supports **OpenCode 1.x and 2.x**. The default export carries both entrypoints: V1 calls `server()`, V2 calls `setup()`. The V1 hook surface is unchanged.
+
 Free models are cheap but come with strings. They can vanish. They can throttle you. Some train on your prompts. So free routing is opt-in. You choose per message, per session, or per project.
 
 ---
@@ -16,12 +18,14 @@ Paste this into any OpenCode chat:
 
 Or install it by hand. Pick **one scope**: global (`~/.config/opencode`) or project (`<project>/.opencode`). OpenCode loads every copy it finds. Two copies run with unsynchronized session state.
 
-| File | Destination |
-| --- | --- |
-| `free-model-router.ts` | `<config-dir>/plugins/free-model-router.ts` |
-| `command/free.md` | `<config-dir>/command/free.md` |
+| File | Destination | Needed on |
+| --- | --- | --- |
+| `free-model-router.ts` | `<config-dir>/plugins/free-model-router.ts` | V1 and V2 |
+| `command/free.md` | `<config-dir>/command/free.md` | V1 only (V2 registers `/free` natively) |
 
 `<config-dir>` is `~/.config/opencode` on Linux and macOS. On Windows it is `%USERPROFILE%\.config\opencode`.
+
+V2 auto-discovers a single `.ts` or `.js` file in either `<config-dir>/plugins/` or `<config-dir>/plugin/`, so the same path works. It also auto-discovers project plugins in `<project>/.opencode/plugins/`. If you list a plugin in the `plugins` config field instead, point at a **directory**, not a file; V2 rejects configured file paths.
 
 #### Linux / macOS
 ```bash
@@ -37,7 +41,9 @@ Copy-Item free-model-router.ts "$HOME\.config\opencode\plugins\free-model-router
 Copy-Item command\free.md "$HOME\.config\opencode\command\free.md"
 ```
 
-Restart OpenCode. Run `/free`. It prints the routing status and the candidate chain.
+The `command/` copy is only needed on V1. V2 registers `/free` as a native command, so you can skip `command/free.md` there.
+
+Restart OpenCode (or run `/reload` in V2). Run `/free`. It prints the routing status and the candidate chain.
 
 ---
 
@@ -49,11 +55,11 @@ Add `@free` to a message. Optionally name a model.
 
 ```text
 @free explain this stack trace
-@free space-bunny-free refactor this helper function
-@free opencode-go/longcat-2.5-preview-free write a test suite
+@free beam-free refactor this helper function
+@free opencode-go/crouton-alpha-free write a test suite
 ```
 
-Write model IDs bare (`space-bunny-free`) or with a provider (`opencode/space-bunny-free`, `opencode-go/space-bunny-free`).
+Write model IDs bare (`beam-free`) or with a provider (`opencode/beam-free`, `opencode-go/beam-free`).
 
 ### Route a whole session (`/free`)
 
@@ -71,14 +77,14 @@ Run `/free` with no arguments:
 
 ```text
 free: mode unchanged (off). Usage: /free on | /free off | /free auto | /free <provider/model-id>.
-Candidates in order: 1. opencode/space-bunny-free (pin); 2. opencode/mimo-v2.6-flash-free (configured); 3. opencode/jev-1.13-free (built-in); +7 more.
+Candidates in order: 1. opencode/crouton-alpha-free (pin); 2. opencode/beam-free (configured); 3. opencode/deepseek-v4.1-flash-free (built-in); +9 more.
 ```
 
 ---
 
 ## Pick your free model (`prefer`)
 
-Without config, the router picks a built-in model for each agent role. `muse-spark-1.3-contributor-free` handles coding, planning, and the research family (`explore`, `explorer`, `librarian`, `research`). `mimo-v2.6-flash-free` handles general tasks.
+Without config, the router picks a built-in model for each agent role. `deepseek-v4.1-flash-free` handles coding, planning, and the research family (`explore`, `explorer`, `librarian`, `research`); `mimo-v2.6-flash-free` handles general tasks. Both are checked against the live catalog at runtime: if a default has been retired, the router warns once per session and falls through to the rest of the free catalog.
 
 You can override that. Add a `prefer` key to either config file:
 
@@ -92,8 +98,8 @@ Set `OPENCODE_FREE_ROUTER_GLOBAL_CONFIG` to move the global file.
 ```json
 {
   "prefer": {
-    "default": ["opencode/space-bunny-free", "opencode/mimo-v2.6-flash-free"],
-    "build": "opencode/muse-spark-1.3-contributor-free"
+    "default": ["opencode/beam-free", "opencode/crouton-alpha-free"],
+    "build": "opencode/deepseek-v4.1-flash-free"
   }
 }
 ```
@@ -147,40 +153,101 @@ Create `<project>/.opencode/free-model-router.json`:
 | Mode | Behavior |
 | --- | --- |
 | `"all"` | Allows any free model. This is the default. A one-time toast warns about prompt training. |
-| `"zdr-only"` | Allows only verified Zero Data Retention models (`space-bunny-free`, `longcat-2.5-preview-free`). Drops other models from preference chains and shows a toast. |
+| `"zdr-only"` | Allows only models not documented to train on or log prompts (blocklist below). Drops documented trainers from preference chains with a warning. If nothing in the chain qualifies, stays on the paid model. |
 | `"off"` | Disables free routing. `@free` tags are stripped and ignored. `/free` toggles are blocked. Every request stays on paid models. |
 
 > **Privacy note:** `mode` is project-scoped only. A global config cannot force or disable a mode for a project.
+
+#### Tightening `zdr-only` without a code change (`zdrBlock`)
+
+Zen's default is zero-retention with no training use, so `zdr-only` fails open: new undocumented models route. If you distrust a model family, add substrings (matched case-insensitively against the model ID) to either config file:
+
+```json
+{
+  "mode": "zdr-only",
+  "zdrBlock": ["my-new-trainer"]
+}
+```
+
+Project and global lists merge (union). A malformed `zdrBlock` triggers a warning and is ignored.
 
 ---
 
 ## Catalog and ZDR reference
 
-Verified models, as of October 2026:
+The router discovers the live catalog at runtime from the Zen endpoint and `opencode models`. The table below is the last manually verified snapshot (November 2026), not a guarantee: free models come and go, and the October 2026 lineup (`space-bunny`, `longcat`, `muse-spark-contributor`, `jev`, `ling`, `nemotron`) has since been retired. When a listed model is absent, the router skips it and falls through to the rest of the live free catalog.
 
-| Provider | Model ID | ZDR-safe | Retention & Training Policy |
+`zdr-only` works from a blocklist, not an allowlist, because the lineup rotates faster than any allowlist can be maintained. Zen's stated default is zero-retention with no training use, so every model routes under `zdr-only` **except** the documented trainers below (matched as case-insensitive substrings, so future versions of the same families stay blocked). The blocklist also guards `exo-`, a documented trainer family with no live model at snapshot time. No regular updates needed: the list only changes when a *new* trainer is documented. You can additionally block families yourself with `zdrBlock` (above) without touching the code.
+
+| Provider | Model ID | Routes under `zdr-only` | Retention & Training Policy |
 | --- | --- | :---: | --- |
-| `opencode` | `space-bunny-free` | **Yes** | Zero-retention policy; no prompt training |
-| `opencode` | `longcat-2.5-preview-free` | **Yes** | Zero-retention policy; no prompt training |
-| `opencode-go` | `space-bunny-free` | **Yes** | Zero-retention policy; no prompt training |
-| `opencode-go` | `longcat-2.5-preview-free` | **Yes** | Zero-retention policy; no prompt training |
-| `opencode` | `fledge-alpha-free` | No | Free preview; collected data may be used to improve model |
-| `opencode` | `ling-3.1-flash-free` | No | Free tier; collected data may be used to improve model |
-| `opencode` | `ling-3.0-flash-fin-free` | No | Free tier; collected data may be used to improve model |
+| `opencode` | `beam-free` | **Yes** | Zero-retention default; no documented training use |
+| `opencode` | `crouton-alpha-free` | **Yes** | Zero-retention default; no documented training use |
+| `opencode` | `deepseek-v4.1-flash-free` | **Yes** | Zero-retention default; no documented training use |
+| `opencode` | `flint-40b-free` | **Yes** | Zero-retention default; no documented training use |
+| `opencode` | `glm-5.3-flash-free` | **Yes** | Zero-retention default; no documented training use |
+| `opencode` | `iceman-free` | **Yes** | Zero-retention default; no documented training use |
+| `opencode` | `inkling-2-small-free` | **Yes** | Zero-retention default; no documented training use |
+| `opencode-go` | `beam-free` | **Yes** | Zero-retention default; no documented training use |
+| `opencode-go` | `crouton-alpha-free` | **Yes** | Zero-retention default; no documented training use |
+| `opencode-go` | `iceman-contributor-free` | No | "Contributor" tier is blocked under zdr-only until the provider documents zero retention |
+| `opencode` | `big-pickle` | No | Stealth free model; collected data may be used to improve model |
 | `opencode` | `mimo-v2.6-flash-free` | No | Free tier; collected data may be used to improve model |
 | `opencode` | `mimo-v2.5-free` | No | Free tier; collected data may be used to improve model |
-| `opencode` | `nemotron-3-ultra-free` | No | NVIDIA trial endpoint; logged for security & service improvement |
-| `opencode` | `nemotron-3.5-lightning-free` | No | NVIDIA trial endpoint; logged for security & service improvement |
-| `opencode` | `muse-spark-1.3-contributor-free` | No | Contributor tier; prompts/completions train future Meta models |
-| `opencode` | `muse-spark-1.2-contributor-free` | No | Contributor tier; prompts/completions train future Meta models |
-| `opencode` | `big-pickle` | No | Stealth free model; collected data may be used to improve model |
-| `opencode` | `jev-1.13-free` | No | Structured decision model; data retained per TypeSafe AI policy |
+| `opencode` | `ling-3.1-flash-free` | No | Free tier; collected data may be used to improve model (retired, stays blocked) |
+| `opencode` | `ling-3.0-flash-fin-free` | No | Free tier; collected data may be used to improve model (retired, stays blocked) |
+| `opencode` | `fledge-alpha-free` | No | Free preview; collected data may be used to improve model (retired, stays blocked) |
+| `opencode` | `nemotron-3-ultra-free` | No | NVIDIA trial endpoint; logged for security & service improvement (retired, stays blocked) |
+| `opencode` | `nemotron-3.5-lightning-free` | No | NVIDIA trial endpoint; logged for security & service improvement (retired, stays blocked) |
+| `opencode` | `muse-spark-1.3-contributor-free` | No | Contributor tier; prompts/completions train future Meta models (retired, stays blocked) |
+| `opencode` | `jev-1.13-free` | No | Structured decision model; data retained per TypeSafe AI policy (retired, stays blocked) |
+
+---
+
+## OpenCode 2.x compatibility
+
+The same `free-model-router.ts` runs on both generations. V2 calls the plugin's `setup()` entrypoint; V1 calls `server()`. V1 keeps the original `chat.message` / command / tool hooks. V2 uses the new domain hooks:
+
+| V1 hook | V2 replacement |
+| --- | --- |
+| `chat.message` | `session.hook("prompt")` |
+| `command.execute.before` | native `command.transform` (`/free`) plus a literal `/free` prompt fallback |
+| `tool.execute.before` / `after` | `tool.hook("execute.before")` / `("execute.after")` |
+| TUI toast | synthetic session message |
+
+### How per-message routing works in V2
+
+V2 has no model field on a prompt. The plugin's `prompt` hook runs before the turn is admitted and calls `session.switchModel(...)`; that switch commits before the model request, so it applies to the **current** turn. After a one-shot `@free` turn, the `experimental.idle` hook restores your paid model. If a turn fails before idle runs, the next non-free prompt restores it.
+
+429 failover uses the V2 `retry` hook: the failed free model is recorded, the next candidate is selected, and the session model is switched for the retry/next turn. When the chain is exhausted, the plugin restores your paid model and stops retrying.
+
+### V2 caveats
+
+- **Session-level model.** The switch is per session, not per request. Normal sequential use is per-turn. Two prompts admitted at the same time race; the latest prompt wins and the stale one is dropped without switching (V2 prompt-sequence guard).
+- **Notices are session messages.** A V2 server plugin cannot show a TUI toast. Status and warnings are admitted as synthetic messages instead. V1 still uses toasts in the TUI; headless V1 (`opencode run`) writes `[free-model-router] ...` to the server log instead.
+- **`/free` is native in V2.** `command/free.md` is not required there.
+- **`title`, `compaction`, and `summary`** are still not routable in V2.
+
+### CLI
+
+`opencode run` is a client of the background server, which owns the plugin and its session state.
+
+```bash
+opencode run "@free explain this stack trace"
+opencode run "/free on"
+opencode run -c "now refactor the helper"
+```
+
+- `@free` works because the prompt hook sees the text before admission.
+- A literal `/free ...` prompt is handled by the same hook, so the command works from `run` even though `run` has no slash-command parser.
+- `-c` / `--continue` reuses the session on the same background server, so `/free on` persists across `run` calls. `--standalone` starts a private server per invocation, so session mode does not persist between separate runs.
+- To pin a model for one CLI turn: `opencode run "@free opencode/beam-free summarize this"`.
 
 ---
 
 ## Design rules
 
-- **One default export.** OpenCode scans every `.ts` file in the plugin directory. A non-function export fails with *"Plugin export is not a function"*. `free-model-router.ts` exports exactly one default function.
+- **One runtime export.** The file exports exactly one default object: `{ id, setup, server }`. V1's legacy loader iterates every runtime export, so a named helper or constant fails with *"Plugin export is not a function"*. Type-only exports are erased and safe. V2 reads `id` + `setup`; V1 reads `id` + `server`.
 - **One install scope.** OpenCode loads every copy it finds. Two copies double-execute with unsynchronized state.
 - **Failures degrade, never crash.** Network errors, malformed JSON, and unknown model IDs fall back to safe defaults and show a toast. The chat session survives.
 - **Hooks have deadlines.** Session resolution and network calls time out. The TUI never hangs.
@@ -198,7 +265,7 @@ bun test/smoke.test.ts
 
 Or with Node: `npx -y tsx test/smoke.test.ts`
 
-The suite runs offline against pinned fixtures. It covers hook surfaces, tag parsing, 429 failover, project policy switching, subagent inheritance, and preference order.
+The suite runs offline against pinned fixtures (130 tests). It covers the V1 hook surface, V2 prompt/idle/retry/tool hooks with a fake host, concurrent-prompt race handling, headless (no-TUI) notice fallback, tag parsing, 429 failover, project policy switching, subagent inheritance, preference order, and the native `/free` command.
 
 ---
 
