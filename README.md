@@ -25,7 +25,7 @@ Or install it by hand. Pick **one scope**: global (`~/.config/opencode`) or proj
 
 `<config-dir>` is `~/.config/opencode` on Linux and macOS. On Windows it is `%USERPROFILE%\.config\opencode`.
 
-V2 auto-discovers a single `.ts` or `.js` file in either `<config-dir>/plugins/` or `<config-dir>/plugin/`, so the same path works. It also auto-discovers project plugins in `<project>/.opencode/plugins/`. If you list a plugin in the `plugins` config field instead, point at a **directory**, not a file; V2 rejects configured file paths.
+V2 auto-discovers a single `.ts` or `.js` file in either `<config-dir>/plugins/` or `<config-dir>/plugin/`, so the same path works. It also auto-discovers project plugins in `<project>/.opencode/plugins/`. If you list a plugin in the `plugin` config field instead, point at a **directory**, not a file; V2 rejects configured file paths.
 
 #### Linux / macOS
 ```bash
@@ -84,7 +84,7 @@ Candidates in order: 1. opencode/longcat-2.5-free (pin); 2. opencode/beam-free (
 
 ## Pick your free model (`prefer`)
 
-Without config, the router picks a built-in model for each agent role. `deepseek-v4.1-flash-free` handles coding, planning, and the research family (`explore`, `explorer`, `librarian`, `research`); `mimo-v2.6-flash-free` handles general tasks. Both are checked against the live catalog at runtime: if a default has been retired, the router warns once per session and falls through to the rest of the free catalog.
+Without config, the router picks a built-in model for each agent role. `deepseek-v4.1-flash-free` handles coding, planning, and the research family (`explore`, `explorer`, `librarian`, `research`); `mimo-v2.6-flash-free` handles general tasks (note: it is a documented trainer, so under `/free on` your ordinary chat turns may be used for training unless you set `prefer` or `"mode": "zdr-only"`). Both are checked against the live catalog at runtime: if a default has been retired, the router warns once per session and falls through to the rest of the free catalog.
 
 You can override that. Add a `prefer` key to either config file:
 
@@ -104,7 +104,7 @@ Set `OPENCODE_FREE_ROUTER_GLOBAL_CONFIG` to move the global file.
 }
 ```
 
-Keys are agent roles: `build`, `plan`, `general`, `explore`, `explorer`, `librarian`, `research`, or your own. The research family is covered under both host spellings: core opencode registers `explore`, OMO slim registers `explorer` and `librarian`. A `prefer` entry naming any of them is a recognized role, so the same policy works on either host. Values are a model string or an ordered fallback list. Use `"default"` (or `*`) as the catch-all. On a 429, the router moves to the next model in the list.
+Keys are agent roles: `build`, `plan`, `general`, `explore`, `explorer`, `librarian`, `research`, or your own. The research family is covered under both host spellings: core opencode registers `explore`, OMO slim registers `explorer` and `librarian`. A `prefer` entry naming any of them is a recognized role, so the same policy works on either host. Values are a model string or an ordered fallback list. Use `"default"` (or `*`) as the catch-all. On a 429 or an exhausted free quota ("Free usage limit reached"), the router moves to the next model in the list.
 
 ### Which model wins
 
@@ -118,6 +118,10 @@ The router takes the first match in this order:
 6. Built-in role default
 7. Rest of the free catalog
 8. Your paid model
+
+### Subagents follow the session
+
+`/free` applies to everything the session spawns, not just the turns you type. When an orchestrator delegates (core `task`, oh-my-opencode-slim's V2 `subagent` tool, or OMO's `delegate_task` / `call_omo_agent`), the child is started on the session's free pick even if that agent is configured for a paid model. Child sessions follow the parent's mode and pin live: `/free off` or a new pin in the parent reaches children that already exist. Running `/free` inside a child gives that child its own mode. Under `/free auto`, only allowlisted child roles are routed.
 
 ### Choose roles for `/free auto` (`auto.roles`)
 
@@ -152,7 +156,7 @@ Create `<project>/.opencode/free-model-router.json`:
 
 | Mode | Behavior |
 | --- | --- |
-| `"all"` | Allows any free model. This is the default. A one-time toast warns about prompt training. |
+| `"all"` | Allows any free model. This is the default. A one-time notice warns about prompt training. |
 | `"zdr-only"` | Allows only models not documented to train on or log prompts (blocklist below). Drops documented trainers from preference chains with a warning. If nothing in the chain qualifies, stays on the paid model. |
 | `"off"` | Disables free routing. `@free` tags are stripped and ignored. `/free` toggles are blocked. Every request stays on paid models. |
 
@@ -193,7 +197,7 @@ The router discovers the live catalog at runtime from the Zen endpoint and `open
 | `opencode` | `big-pickle` | No | Stealth free model; collected data may be used to improve model |
 | `opencode` | `inkling-2-small-free` | No | Free tier; data retained and may be used for performance monitoring and model training |
 | `opencode` | `mimo-v2.6-flash-free` | No | Free tier; collected data may be used to improve model |
-| `opencode` | `mimo-v2.5-free` | No | Free tier; collected data may be used to improve model |
+| `opencode` | `mimo-v2.5-free` | No | Free tier; collected data may be used to improve model (retired, stays blocked) |
 | `opencode` | `ling-3.1-flash-free` | No | Free tier; collected data may be used to improve model (retired, stays blocked) |
 | `opencode` | `ling-3.0-flash-fin-free` | No | Free tier; collected data may be used to improve model (retired, stays blocked) |
 | `opencode` | `fledge-alpha-free` | No | Free preview; collected data may be used to improve model (retired, stays blocked) |
@@ -240,6 +244,7 @@ opencode run -c "now refactor the helper"
 
 - `@free` works because the prompt hook sees the text before admission.
 - A literal `/free ...` prompt is handled by the same hook, so the command works from `run` even though `run` has no slash-command parser.
+- On V1 (1.x), use the command flag instead: `opencode run --command free on`. To keep `/free` state across V1 `run` calls, attach every call to one server (`opencode serve --port 4096`, then `opencode run --attach http://127.0.0.1:4096 --session <id> ...`); each standalone V1 `run` is a new process with fresh state.
 - `-c` / `--continue` reuses the session on the same background server, so `/free on` persists across `run` calls. `--standalone` starts a private server per invocation, so session mode does not persist between separate runs.
 - **Git Bash rewrites a leading `/free`.** MSYS2 turns the argv element `/free` into an absolute path (`C:/Program Files/Git/free`) before opencode sees it. The plugin recognizes the rewritten form, so `opencode run "/free ..."` still works from Git Bash. For an untouched argument, set `MSYS_NO_PATHCONV=1`.
 - To pin a model for one CLI turn: `opencode run "@free opencode/beam-free summarize this"`.
@@ -250,8 +255,9 @@ opencode run -c "now refactor the helper"
 
 - **One runtime export.** The file exports exactly one default object: `{ id, setup, server }`. V1's legacy loader iterates every runtime export, so a named helper or constant fails with *"Plugin export is not a function"*. Type-only exports are erased and safe. V2 reads `id` + `setup`; V1 reads `id` + `server`.
 - **One install scope.** OpenCode loads every copy it finds. Two copies double-execute with unsynchronized state.
-- **Failures degrade, never crash.** Network errors, malformed JSON, and unknown model IDs fall back to safe defaults and show a toast. The chat session survives.
-- **Hooks have deadlines.** Session resolution and network calls time out. The TUI never hangs.
+- **Failures degrade, never crash.** Network errors, malformed JSON, and unknown model IDs fall back to safe defaults and show a notice. The chat session survives.
+- **Hooks have deadlines.** Session resolution and network calls time out, and notices are posted in the background, so a slow host never holds up your prompt.
+- **One module, many instances.** OpenCode loads the plugin once per project directory on a shared module. Each instance's hooks run in their own host context, so one project's instance never acts on another project's sessions.
 - **The catalog probe cannot recurse.** The `opencode models` CLI spawn reloads this plugin in the child process, which would spawn another probe forever. The child refuses to spawn again (`OPENCODE_FMR_NO_SPAWN`), so discovery degrades to the pinned fallback instead of fork-bombing.
 
 ---

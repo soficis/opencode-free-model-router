@@ -62,3 +62,10 @@ scratch/
 tmp/
 temp/
 *.tmp
+
+# Session/chat exports and local agent memory (never public)
+/*.json
+!/package.json
+ses_*.json
+memory/
+.claude/
