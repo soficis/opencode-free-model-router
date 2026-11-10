@@ -20,6 +20,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 // ---- host adapters (structural types only; no runtime plugin imports) ------
 interface V1Context {
@@ -1172,8 +1173,9 @@ async function toolExecuteAfter(input: ToolAfterInput, output: ToolAfterOutput):
 
 async function v2SessionInfo(sessionID: string): Promise<any | null> {
   try {
-    if (!pluginCtx.v2) return null;
-    const res: any = await pluginCtx.v2.session.get({ sessionID });
+    const v2 = currentCtx().v2;
+    if (!v2) return null;
+    const res: any = await v2.session.get({ sessionID });
     const data = res?.data ?? res;
     return data !== null && typeof data === "object" ? data : null;
   } catch {
@@ -1196,8 +1198,9 @@ async function v2CurrentModel(
 
 async function v2SwitchModel(sessionID: string, pick: ModelRef): Promise<boolean> {
   try {
-    if (!pluginCtx.v2) return false;
-    await pluginCtx.v2.session.switchModel({
+    const v2 = currentCtx().v2;
+    if (!v2) return false;
+    await v2.session.switchModel({
       sessionID,
       model: { providerID: pick.providerID, id: pick.modelID },
     });
@@ -1585,7 +1588,8 @@ async function v2CommandExecute(input: any): Promise<void> {
 }
 
 async function v2Setup(ctx: V2Context): Promise<() => Promise<void>> {
-  pluginCtx = { kind: "v2", v2: ctx, directory: ctx?.location?.directory };
+  const inst: PluginCtx = { kind: "v2", v2: ctx, directory: ctx?.location?.directory };
+  lastCtx = inst;
   const regs: V2Registration[] = [];
   const add = async (
     work: () => Promise<V2Registration> | V2Registration | undefined,
@@ -1597,18 +1601,18 @@ async function v2Setup(ctx: V2Context): Promise<() => Promise<void>> {
       // one unavailable hook must not disable the rest
     }
   };
-  await add(() => ctx.session.hook("prompt", v2OnPrompt));
-  await add(() => ctx.session.hook("experimental.idle", v2OnIdle));
-  await add(() => ctx.session.hook("retry", v2OnRetry));
-  await add(() => ctx.tool.hook("execute.before", v2OnToolBefore));
-  await add(() => ctx.tool.hook("execute.after", v2OnToolAfter));
+  await add(() => ctx.session.hook("prompt", bindCtx(inst, v2OnPrompt)));
+  await add(() => ctx.session.hook("experimental.idle", bindCtx(inst, v2OnIdle)));
+  await add(() => ctx.session.hook("retry", bindCtx(inst, v2OnRetry)));
+  await add(() => ctx.tool.hook("execute.before", bindCtx(inst, v2OnToolBefore)));
+  await add(() => ctx.tool.hook("execute.after", bindCtx(inst, v2OnToolAfter)));
   await add(() =>
     ctx.command.transform((editor) => {
       editor.add({
         name: "free",
         description:
           "Flip this session between free and paid model routing (on, off, auto, or model-id | provider/model-id)",
-        execute: v2CommandExecute,
+        execute: bindCtx(inst, v2CommandExecute),
       });
     }),
   );
@@ -1624,14 +1628,15 @@ async function v2Setup(ctx: V2Context): Promise<() => Promise<void>> {
 }
 
 async function v1Server(ctx: V1Context) {
-  pluginCtx = { kind: "v1", client: ctx?.client, directory: ctx?.directory };
+  const inst: PluginCtx = { kind: "v1", client: ctx?.client, directory: ctx?.directory };
+  lastCtx = inst;
   // Startup toast: fire-and-forget so plugin init never waits on discovery.
-  void catalogSummary().then((summary) => notify(summary), () => undefined);
+  void ctxStore.run(inst, () => catalogSummary().then((summary) => notify(summary), () => undefined));
   return {
-    "chat.message": withChatFailover,
-    "command.execute.before": commandExecuteBefore,
-    "tool.execute.before": withToolFailover,
-    "tool.execute.after": toolExecuteAfter,
+    "chat.message": bindCtx(inst, withChatFailover),
+    "command.execute.before": bindCtx(inst, commandExecuteBefore),
+    "tool.execute.before": bindCtx(inst, withToolFailover),
+    "tool.execute.after": bindCtx(inst, toolExecuteAfter),
   };
 }
 
@@ -1825,12 +1830,28 @@ function policyWarnings(read: PolicyFileRead, label: string): string[] {
 const policyCache = new Map<string, PolicyCacheEntry>();
 const sessionMetaCache = new Map<string, { directory: string; parentID: string | null }>();
 const toastedSessions = new Set<string>();
-let pluginCtx: {
+interface PluginCtx {
   kind?: "v1" | "v2";
   client?: any;
   directory?: string;
   v2?: V2Context;
-} = {};
+}
+// opencode runs one plugin INSTANCE per project directory but imports this
+// module once, so setup()/server() is called many times on shared module
+// state. A single module-level context was overwritten by whichever instance
+// loaded last, and every hook then talked to the wrong instance: switchModel
+// and session.get failed for the user's session, so the parent was never
+// switched and children never found their parent. Each hook now runs inside
+// its own instance's context; lastCtx is only the fallback for code that
+// runs outside a hook (startup toast).
+const ctxStore = new AsyncLocalStorage<PluginCtx>();
+let lastCtx: PluginCtx = {};
+function currentCtx(): PluginCtx {
+  return ctxStore.getStore() ?? lastCtx;
+}
+function bindCtx<A extends unknown[], R>(ctx: PluginCtx, fn: (...args: A) => R): (...args: A) => R {
+  return (...args: A) => ctxStore.run(ctx, () => fn(...args));
+}
 
 /**
  * Best-effort user notice; never throws, never blocks longer than 2s.
@@ -1856,6 +1877,7 @@ async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | undefin
 
 async function notify(message: string, sessionID?: string, wake = false): Promise<void> {
   try {
+    const pluginCtx = currentCtx();
     if (pluginCtx.kind === "v2" && pluginCtx.v2) {
       if (typeof sessionID !== "string" || sessionID === "") return;
       await withTimeout(
@@ -1891,6 +1913,7 @@ async function notify(message: string, sessionID?: string, wake = false): Promis
 async function sessionMeta(sessionID: string, deadlineAt: number): Promise<{ directory: string; parentID: string | null }> {
   const cached = sessionMetaCache.get(sessionID);
   if (cached !== undefined) return cached;
+  const pluginCtx = currentCtx();
   let dir = typeof pluginCtx.directory === "string" ? pluginCtx.directory : process.cwd();
   let parentID: string | null = null;
   try {

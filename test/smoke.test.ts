@@ -939,6 +939,26 @@ const v2ctx = {
 };
 
 const v2cleanup = await plugin.setup(v2ctx as any);
+// opencode imports this module once and calls setup() once per project
+// instance. A second instance loading later must not hijack the first
+// instance's hooks: every G check below runs on the FIRST instance's hooks
+// while this foreign instance (which cannot see those sessions) loaded last.
+const foreignHooks = new Map<string, any>();
+const foreignReg = async (name: string, cb: any) => {
+  foreignHooks.set(name, cb);
+  return { dispose: async () => {} };
+};
+const foreignCleanup = await plugin.setup({
+  location: { directory: "C:/elsewhere" },
+  session: {
+    get: async () => { throw new Error("NotFound: session belongs to another instance"); },
+    switchModel: async () => { throw new Error("NotFound: session belongs to another instance"); },
+    synthetic: async () => { throw new Error("NotFound"); },
+    hook: foreignReg,
+  },
+  tool: { hook: foreignReg },
+  command: { transform: async () => ({ dispose: async () => {} }) },
+} as any);
 check(v2Disposed === 0, "G: V2 setup registers without disposing");
 check(typeof v2Hooks.get("prompt") === "function", "G: V2 prompt hook registered");
 check(typeof v2Hooks.get("experimental.idle") === "function", "G: V2 idle hook registered");
@@ -1255,6 +1275,7 @@ check(
 
 // G7: setup returns a cleanup that disposes every registration.
 await v2cleanup();
+await foreignCleanup();
 check(v2Disposed === 6, "G: V2 cleanup disposes all six registrations");
 
 console.log(`${pass} pass ${fail} fail`);
