@@ -96,8 +96,8 @@ check(bare.text === "" && modelKey(bare.model) === "opencode/mimo-v2.6-flash-fre
 const anyPick = await routeOnce("p-pick", "@free ping");
 check(modelKey(anyPick.model) !== modelKey(PAID) && isFreeId(anyPick.model.modelID), "pickFree returns a pick");
 
-const pref = await routeOnce("p-pref", "@free crouton-alpha-free x");
-check(pref.model.modelID === "crouton-alpha-free", "pickFree honors preferredId");
+const pref = await routeOnce("p-pref", "@free longcat-2.5-free x");
+check(pref.model.modelID === "longcat-2.5-free", "pickFree honors preferredId");
 
 const pin = await routeOnce("p-pinf", "@free opencode-go/iceman-contributor-free x");
 check(pin.model.providerID === "opencode-go" && pin.model.modelID === "iceman-contributor-free", "pickFree provider-qualified pin");
@@ -105,7 +105,7 @@ check(pin.model.providerID === "opencode-go" && pin.model.modelID === "iceman-co
 // Project policy zdr-only: a blocked (trainer) pin must fall through to a ZDR-safe id.
 sessionDirs.set("p-zdr", join(PROJ, "fixtures", "zdr-only"));
 const zdr = await routeOnce("p-zdr", "@free mimo-v2.6-flash-free x");
-check(["opencode/beam-free", "opencode/crouton-alpha-free", "opencode/deepseek-v4.1-flash-free", "opencode/flint-40b-free", "opencode/glm-5.3-flash-free", "opencode/iceman-free", "opencode/longcat-2.5-free", "opencode-go/beam-free", "opencode-go/crouton-alpha-free", "opencode-go/iceman-contributor-free", "opencode-go/longcat-2.5-free"].includes(modelKey(zdr.model)), "zdrOnly restricts to ZDR-safe ids");
+check(["opencode/beam-free", "opencode/longcat-2.5-free", "opencode/deepseek-v4.1-flash-free", "opencode/flint-40b-free", "opencode/glm-5.3-flash-free", "opencode/iceman-free", "opencode/longcat-2.5-free", "opencode-go/beam-free", "opencode-go/longcat-2.5-free", "opencode-go/iceman-contributor-free", "opencode-go/longcat-2.5-free"].includes(modelKey(zdr.model)), "zdrOnly restricts to ZDR-safe ids");
 
 // "ling-" is boundary-matched, so it deliberately does NOT catch "inkling-...":
 // the family needs its own entry or a documented trainer routes under zdr-only.
@@ -277,18 +277,28 @@ check(modelKey(bareRouted.model) === "opencode/beam-free", "P: a bare /free pin 
 
 const bareBogus = await freeArgs("pin-bare-bogus", "not-a-model");
 check(bareBogus.indexOf("unknown argument") !== -1, "P: /free still rejects a non-free bare id");
+// Crouton was retired and became the PAID muse-ember-1.0: neither may route.
+const ember = await freeArgs("pin-ember", "opencode/muse-ember-1.0");
+check(ember.indexOf("unknown argument") !== -1, "P: /free refuses the paid muse-ember-1.0");
+const croutonGone = await freeArgs("pin-crouton", "opencode-go/crouton-alpha-free");
+const croutonRouted = await routeOnce("pin-crouton", "after crouton pin");
+check(
+  croutonGone.indexOf("Next turn: opencode-go/crouton-alpha-free") === -1 &&
+    croutonRouted.model.modelID !== "crouton-alpha-free",
+  "P: a stale crouton pin never routes (absent from the pinned catalog)",
+);
 
 // The pin (not just the mode) is inherited: the research role default is
-// deepseek-v4.1-flash-free, so a crouton pin on the child proves inheritance.
+// deepseek-v4.1-flash-free, so a longcat pin on the child proves inheritance.
 const pinPar = "pin-inherit-par";
 sessionParents.set("pin-inherit-child", pinPar);
-await freeArgs(pinPar, "crouton-alpha-free");
+await freeArgs(pinPar, "longcat-2.5-free");
 const pinChild = await routeOnce("pin-inherit-child", "untagged research turn", { agent: "research" });
-check(modelKey(pinChild.model) === "opencode/crouton-alpha-free", "P: child session inherits the parent's /free pin");
+check(modelKey(pinChild.model) === "opencode/longcat-2.5-free", "P: child session inherits the parent's /free pin");
 
 // ---- Section 4: prefer (global + project, merged per role) -----------------
 // Fixture ids must exist in the plugin's PINNED catalog: prefer-ids use
-// opencode/beam-free and opencode-go/crouton-alpha-free and
+// opencode/beam-free and opencode-go/longcat-2.5-free and
 // opencode-go/iceman-contributor-free. Every message carries the bare
 // "@free" tag so the tag parser cannot also capture a requestedId pin.
 const GLOBAL_DIR = join(PROJ, "fixtures", "prefer-global");
@@ -318,7 +328,7 @@ const preferBadDir = join(PROJ, "fixtures", "prefer-badjson");
 const strDir = "prefer-string-sid";
 sessionDirs.set(strDir, preferStringDir);
 const pString = await routeOnce(strDir, "@free say hi", { agent: "general" });
-check(modelKey(pString.model) === "opencode/crouton-alpha-free", "D: a string prefer routes to that model");
+check(modelKey(pString.model) === "opencode/longcat-2.5-free", "D: a string prefer routes to that model");
 
 const listDir = "prefer-list-sid";
 sessionDirs.set(listDir, preferListDir);
@@ -331,7 +341,7 @@ check(
 const rolesResearch = "prefer-roles-research";
 sessionDirs.set(rolesResearch, preferRolesDir);
 const pRole = await routeOnce(rolesResearch, "@free say hi", { agent: "research" });
-check(modelKey(pRole.model) === "opencode-go/crouton-alpha-free", "D: a per-role prefer applies to that role");
+check(modelKey(pRole.model) === "opencode-go/longcat-2.5-free", "D: a per-role prefer applies to that role");
 
 const rolesCode = "prefer-roles-code";
 sessionDirs.set(rolesCode, preferRolesDir);
@@ -364,7 +374,7 @@ const slimOther = "prefer-slim-other";
 sessionDirs.set(slimOther, preferSlimDir);
 const pSlimOther = await routeOnce(slimOther, "@free say hi", { agent: "general" });
 check(
-  modelKey(pSlimOther.model) === "opencode/crouton-alpha-free",
+  modelKey(pSlimOther.model) === "opencode/longcat-2.5-free",
   "D: the catch-all prefer still answers a role the slim entries do not name",
 );
 const slimWarns = toasts.slice(slimWarnMark).filter((t) => t.indexOf("unknown role") !== -1);
@@ -378,14 +388,14 @@ await withGlobalConfig(globalRoles, async () => {
   sessionDirs.set(gResearch, preferStringDir);
   const r1 = await routeOnce(gResearch, "@free say hi", { agent: "research" });
   check(
-    modelKey(r1.model) === "opencode-go/crouton-alpha-free",
+    modelKey(r1.model) === "opencode-go/longcat-2.5-free",
     "D: a global named role wins over a project blanket prefer",
   );
   const gGeneral = "prefer-global-general";
   sessionDirs.set(gGeneral, preferStringDir);
   const r2 = await routeOnce(gGeneral, "@free say hi", { agent: "general" });
   check(
-    modelKey(r2.model) === "opencode/crouton-alpha-free",
+    modelKey(r2.model) === "opencode/longcat-2.5-free",
     "D: a project blanket prefer still answers roles the global does not name",
   );
 });
@@ -450,7 +460,7 @@ const markUnknown = toasts.length;
 const pUnknown = await routeOnce(unknownFirst, "@free say hi", { agent: "general" });
 const unknownWarns = toasts.slice(markUnknown).filter((t) => t.includes("nope-9-free"));
 check(
-  modelKey(pUnknown.model) === "opencode-go/crouton-alpha-free",
+  modelKey(pUnknown.model) === "opencode-go/longcat-2.5-free",
   "D: an unknown prefer id is skipped for the next entry",
 );
 check(unknownWarns.length === 1, "D: an unknown prefer id warns exactly once");
@@ -492,7 +502,7 @@ const zdrPref = "cand-zdr";
 sessionDirs.set(zdrPref, zdrPrefDir);
 const pZdr = await routeOnce(zdrPref, "@free say hi", { agent: "general" });
 check(
-  modelKey(pZdr.model) === "opencode-go/crouton-alpha-free",
+  modelKey(pZdr.model) === "opencode-go/longcat-2.5-free",
   "D: zdr-only keeps only safe models from the configured list",
 );
 // zdr-only discarding a CONFIGURED entry is a silent preference loss unless the plugin
@@ -531,7 +541,7 @@ check(
 await toolAfter("fail-pref", "HTTP 429 Too Many Requests");
 const fp2 = await routeOnce("fail-pref", "@free say hi");
 check(
-  modelKey(fp2.model) === "opencode-go/crouton-alpha-free",
+  modelKey(fp2.model) === "opencode-go/longcat-2.5-free",
   "D: failover follows the configured preferences",
 );
 
@@ -1160,12 +1170,12 @@ check(
 // inherits mode AND pin (the admission ticket must not poison inheritance),
 // and delegation stamping uses the pin instead of the role default.
 v2Session("v2-pin-par", "build");
-await v2Command.execute({ sessionID: "v2-pin-par", prompt: { text: "crouton-alpha-free" } });
+await v2Command.execute({ sessionID: "v2-pin-par", prompt: { text: "longcat-2.5-free" } });
 v2Session("v2-pin-child", "research", "v2-pin-par");
 await v2Hooks.get("prompt")!({ sessionID: "v2-pin-child", prompt: { text: "do research" } });
 const pinChildCalls = v2SwitchCalls.filter((c) => c.sessionID === "v2-pin-child");
 check(
-  pinChildCalls.length === 1 && pinChildCalls[0].model.id === "crouton-alpha-free",
+  pinChildCalls.length === 1 && pinChildCalls[0].model.id === "longcat-2.5-free",
   "G: V2 child session inherits the /free pin through the prompt hook",
 );
 v2Session("v2-tool-pin");
@@ -1221,9 +1231,9 @@ await v2Command.execute({ sessionID: "v2-live-par", prompt: { text: "opencode-go
 v2Session("v2-live-kid", "explorer", "v2-live-par");
 await v2Hooks.get("prompt")!({ sessionID: "v2-live-kid", prompt: { text: "work" } });
 check(v2Sessions.get("v2-live-kid")!.model.id === "beam-free", "G: child routes to the parent's pin");
-await v2Command.execute({ sessionID: "v2-live-par", prompt: { text: "opencode/crouton-alpha-free" } });
+await v2Command.execute({ sessionID: "v2-live-par", prompt: { text: "opencode/longcat-2.5-free" } });
 await v2Hooks.get("prompt")!({ sessionID: "v2-live-kid", prompt: { text: "more work" } });
-check(v2Sessions.get("v2-live-kid")!.model.id === "crouton-alpha-free", "G: child follows a re-pin in the parent");
+check(v2Sessions.get("v2-live-kid")!.model.id === "longcat-2.5-free", "G: child follows a re-pin in the parent");
 await v2Command.execute({ sessionID: "v2-live-par", prompt: { text: "off" } });
 await v2Hooks.get("prompt")!({ sessionID: "v2-live-kid", prompt: { text: "after off" } });
 check(
@@ -1288,11 +1298,11 @@ check(
 v2Session("v2-gitbash-cmd");
 await v2Command.execute({
   sessionID: "v2-gitbash-cmd",
-  prompt: { text: "C:/Program Files/Git/free opencode-go/crouton-alpha-free" },
+  prompt: { text: "C:/Program Files/Git/free opencode-go/longcat-2.5-free" },
 });
 await v2Hooks.get("prompt")!({ sessionID: "v2-gitbash-cmd", prompt: { text: "command arg turn" } });
 check(
-  v2Sessions.get("v2-gitbash-cmd")!.model.id === "crouton-alpha-free",
+  v2Sessions.get("v2-gitbash-cmd")!.model.id === "longcat-2.5-free",
   "G: V2 command recovers a Git Bash path-mangled argument",
 );
 

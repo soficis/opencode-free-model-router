@@ -192,7 +192,6 @@ const PINNED: FreeCatalog = {
   zen: [
     "beam-free",
     "big-pickle",
-    "crouton-alpha-free",
     "deepseek-v4.1-flash-free",
     "flint-40b-free",
     "glm-5.3-flash-free",
@@ -201,7 +200,7 @@ const PINNED: FreeCatalog = {
     "longcat-2.5-free",
     "mimo-v2.6-flash-free",
   ],
-  go: ["beam-free", "crouton-alpha-free", "iceman-contributor-free", "longcat-2.5-free"],
+  go: ["beam-free", "iceman-contributor-free", "longcat-2.5-free"],
 };
 
 interface CatalogCache {
@@ -766,6 +765,9 @@ function parseFreeArgumentCore(
   const modelID = arg.slice(slash + 1);
   if (!FREE_ID_SEGMENT.test(provider) || !FREE_ID_SEGMENT.test(modelID)) return null;
   if (FREE_MODES.has(provider.toLowerCase()) || FREE_MODES.has(modelID.toLowerCase())) return null;
+  // Same free check as a bare id: a paid model (e.g. muse-ember-1.0, which
+  // replaced crouton-alpha-free) must be refused, not "recorded" as a pin.
+  if (detectFree([modelID]).length === 0) return null;
   return { mode: "on", pin: `${provider}/${modelID}` };
 }
 

@@ -56,7 +56,7 @@ Add `@free` to a message. Optionally name a model.
 ```text
 @free explain this stack trace
 @free beam-free refactor this helper function
-@free opencode-go/crouton-alpha-free write a test suite
+@free opencode-go/longcat-2.5-free write a test suite
 ```
 
 Write model IDs bare (`beam-free`) or with a provider (`opencode/beam-free`, `opencode-go/beam-free`).
@@ -77,7 +77,7 @@ Run `/free` with no arguments:
 
 ```text
 free: mode unchanged (off). Usage: /free on | /free off | /free auto | /free <model-id | provider/model-id>.
-Candidates in order: 1. opencode/crouton-alpha-free (pin); 2. opencode/beam-free (configured); 3. opencode/deepseek-v4.1-flash-free (built-in); +9 more.
+Candidates in order: 1. opencode/longcat-2.5-free (pin); 2. opencode/beam-free (configured); 3. opencode/deepseek-v4.1-flash-free (built-in); +9 more.
 ```
 
 ---
@@ -98,7 +98,7 @@ Set `OPENCODE_FREE_ROUTER_GLOBAL_CONFIG` to move the global file.
 ```json
 {
   "prefer": {
-    "default": ["opencode/beam-free", "opencode/crouton-alpha-free"],
+    "default": ["opencode/beam-free", "opencode/longcat-2.5-free"],
     "build": "opencode/deepseek-v4.1-flash-free"
   }
 }
@@ -175,21 +175,19 @@ Project and global lists merge (union). A malformed `zdrBlock` triggers a warnin
 
 ## Catalog and ZDR reference
 
-The router discovers the live catalog at runtime from the Zen endpoint and `opencode models`. The table below is the last manually verified snapshot (November 2026), not a guarantee: free models come and go, and the October 2026 lineup (`space-bunny`, `muse-spark-contributor`, `jev`, `ling`, `nemotron`) has since been retired (longcat has returned as `longcat-2.5-free`). When a listed model is absent, the router skips it and falls through to the rest of the live free catalog.
+The router discovers the live catalog at runtime from the Zen endpoint and `opencode models`. The table below is the last manually verified snapshot (November 2026), not a guarantee: free models come and go, and the October 2026 lineup (`space-bunny`, `muse-spark-contributor`, `jev`, `ling`, `nemotron`) has since been retired (longcat has returned as `longcat-2.5-free`). `crouton-alpha-free` was removed from both providers in November 2026 (it became the paid `muse-ember-1.0`, which the router never routes to). When a listed model is absent, the router skips it and falls through to the rest of the live free catalog.
 
 `zdr-only` works from a blocklist, not an allowlist, because the lineup rotates faster than any allowlist can be maintained. Zen's stated default is zero-retention with no training use, so every model routes under `zdr-only` **except** the documented trainers below (matched as case-insensitive substrings, so future versions of the same families stay blocked). The blocklist also guards `exo-`, a documented trainer family with no live model at snapshot time. No regular updates needed: the list only changes when a *new* trainer is documented. You can additionally block families yourself with `zdrBlock` (above) without touching the code.
 
 | Provider | Model ID | Routes under `zdr-only` | Retention & Training Policy |
 | --- | --- | :---: | --- |
 | `opencode` | `beam-free` | **Yes** | Zero-retention default; no documented training use |
-| `opencode` | `crouton-alpha-free` | **Yes** | Zero-retention default; no documented training use |
 | `opencode` | `deepseek-v4.1-flash-free` | **Yes** | Zero-retention default; no documented training use |
 | `opencode` | `flint-40b-free` | **Yes** | Zero-retention default; no documented training use |
 | `opencode` | `glm-5.3-flash-free` | **Yes** | Zero-retention default; no documented training use |
 | `opencode` | `iceman-free` | **Yes** | Zero-retention default; no documented training use |
 | `opencode` | `longcat-2.5-free` | **Yes** | Zero-retention, no training use; hosted in China; 100 requests/day |
 | `opencode-go` | `beam-free` | **Yes** | Zero-retention default; no documented training use |
-| `opencode-go` | `crouton-alpha-free` | **Yes** | Zero-retention default; no documented training use |
 | `opencode-go` | `iceman-contributor-free` | No | "Contributor" tier is blocked under zdr-only until the provider documents zero retention |
 | `opencode-go` | `longcat-2.5-free` | **Yes** | Zero-retention, no training use; hosted in China; 100 requests/day |
 | `opencode` | `big-pickle` | No | Stealth free model; collected data may be used to improve model |
@@ -268,7 +266,7 @@ bun test/smoke.test.ts
 
 Or with Node: `npx -y tsx test/smoke.test.ts`
 
-The suite runs offline against pinned fixtures (158 tests). It covers the V1 hook surface, V2 prompt/idle/retry/tool hooks with a fake host, concurrent-prompt race handling, headless (no-TUI) notice fallback, tag parsing, 429 failover, project policy switching, subagent inheritance (live parent mode and pin, V2 `subagent` tool stamping over oh-my-opencode-slim presets), preference order, and the native `/free` command.
+The suite runs offline against pinned fixtures (160 tests). It covers the V1 hook surface, V2 prompt/idle/retry/tool hooks with a fake host, concurrent-prompt race handling, headless (no-TUI) notice fallback, tag parsing, 429 failover, project policy switching, subagent inheritance (live parent mode and pin, V2 `subagent` tool stamping over oh-my-opencode-slim presets), preference order, and the native `/free` command.
 
 ---
 
