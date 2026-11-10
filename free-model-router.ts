@@ -120,6 +120,7 @@ const ZDR_BLOCKED_SUBSTRINGS: readonly string[] = [
   "big-pickle", // stealth free: collected data may train the model
   "mimo-v2.5", // free period: collected data may train the model
   "mimo-v2.6", // free period: collected data may train the model
+  "inkling", // Thinking Machines free tier: data retained, may be used for monitoring and training
   "ling-", // free tier: collected data may train the model
   "fledge", // free preview: collected data may train the model
   "nemotron", // NVIDIA free endpoints: sessions logged for security/improvement
@@ -180,11 +181,12 @@ const ROLE_DEFAULT_IDS: Record<string, string> = {
   summarize: "deepseek-v4.1-flash-free",
 };
 
-// Pinned fallback, refreshed 2026-11-07 against the live catalog
+// Pinned fallback, refreshed 2026-11-09 against the live catalog
 // (`opencode models` on both providers plus the Zen endpoint): returned
 // (never thrown) when a source fails, times out, or returns a non-2xx.
-// The October 2026 snapshot (space-bunny, longcat, muse-spark, jev, ling,
-// nemotron) is retired from the live catalog and was dropped here.
+// The October 2026 snapshot (space-bunny, muse-spark, jev, ling, nemotron)
+// is retired from the live catalog and was dropped here; longcat returned as
+// longcat-2.5-free and is pinned again on both providers.
 const PINNED: FreeCatalog = {
   zen: [
     "beam-free",
@@ -195,9 +197,10 @@ const PINNED: FreeCatalog = {
     "glm-5.3-flash-free",
     "iceman-free",
     "inkling-2-small-free",
+    "longcat-2.5-free",
     "mimo-v2.6-flash-free",
   ],
-  go: ["beam-free", "crouton-alpha-free", "iceman-contributor-free"],
+  go: ["beam-free", "crouton-alpha-free", "iceman-contributor-free", "longcat-2.5-free"],
 };
 
 interface CatalogCache {
@@ -570,6 +573,13 @@ interface SessionState {
    * ownership. Sequential prompts are unaffected.
    */
   promptSeq?: number;
+  /**
+   * Subagent sessions: the ancestor whose mode and pin this session follows
+   * LIVE, so a later /free off or re-pin in the parent reaches children that
+   * already exist (background or resumed). Cleared once /free runs in the
+   * child itself.
+   */
+  inheritFrom?: string;
 }
 
 /** Per-session store keyed by chat.message input.sessionID. */
@@ -585,16 +595,35 @@ function getSession(sessionID: string): SessionState {
   return state;
 }
 
-// Subagent sessions carry parentID (session.get): on FIRST touch inherit ONLY the
-// nearest ancestor's mode - failedIds, failoverStore and priorModel stay
-// per-session. Creating the store entry below is the cache (one walk per session);
-// no ancestor state -> "off". seen-set cycle guard, depth <= 16, one shared 2s
-// deadline for the whole walk, and the function never rejects (hooks contract).
+// Subagent sessions carry parentID (session.get): on FIRST touch inherit the
+// nearest ancestor's mode AND preferred pin - failedIds, failoverStore and
+// priorModel stay per-session. Creating the store entry below is the cache
+// (one walk per session); no ancestor state -> "off". seen-set cycle guard,
+// depth <= 16, one shared 2s deadline for the whole walk, and the function
+// never rejects (hooks contract).
+function syncInherited(state: SessionState): void {
+  if (state.inheritFrom === undefined) return;
+  const ancestor = sessionStore.get(state.inheritFrom);
+  if (ancestor === undefined) return;
+  // An ancestor that itself inherits is synced first (chains are short and
+  // acyclic: inheritFrom always points at an entry that existed earlier).
+  syncInherited(ancestor);
+  state.mode = ancestor.mode;
+  const pin = (ancestor as SessionStateWithPin).preferredId;
+  if (pin !== undefined) (state as SessionStateWithPin).preferredId = pin;
+  else delete (state as SessionStateWithPin).preferredId;
+}
+
 async function resolveSession(sessionID: string): Promise<SessionState> {
   const existing = sessionStore.get(sessionID);
-  if (existing !== undefined) return existing;
+  if (existing !== undefined) {
+    syncInherited(existing);
+    return existing;
+  }
   const deadlineAt = Date.now() + 2000;
   let mode: SessionState["mode"] = "off";
+  let pin: string | null = null;
+  let from: string | undefined;
   try {
     const seen = new Set<string>([sessionID]);
     let current = sessionID;
@@ -606,6 +635,11 @@ async function resolveSession(sessionID: string): Promise<SessionState> {
       const ancestor = sessionStore.get(pid);
       if (ancestor !== undefined) {
         mode = ancestor.mode;
+        // A /free pin is session state, not catalog state: without this the
+        // child routes its role default (research -> deepseek-free) instead
+        // of the model the user actually pinned.
+        pin = (ancestor as SessionStateWithPin).preferredId ?? null;
+        from = pid;
         break;
       }
       current = pid;
@@ -617,6 +651,8 @@ async function resolveSession(sessionID: string): Promise<SessionState> {
   let state = sessionStore.get(sessionID);
   if (state === undefined) {
     state = { mode, failedIds: [], priorModel: null };
+    if (pin !== null) (state as SessionStateWithPin).preferredId = pin;
+    if (from !== undefined) state.inheritFrom = from;
     sessionStore.set(sessionID, state);
   }
   return state;
@@ -708,22 +744,60 @@ interface CommandBeforeOutput {
 
 const FREE_MODES = new Set(["on", "off", "auto"]);
 const FREE_ID_SEGMENT = /^[A-Za-z0-9._-]+$/;
-const FREE_USAGE = "/free on | /free off | /free auto | /free <provider/model-id>";
+const FREE_USAGE = "/free on | /free off | /free auto | /free <model-id | provider/model-id>";
 
-function parseFreeArgument(
-  raw: string,
+function parseFreeArgumentCore(
+  arg: string,
 ): { mode: "on" | "off" | "auto"; pin: string | null } | null {
-  const arg = raw.trim();
   if (arg === "") return null;
   const lower = arg.toLowerCase();
   if (FREE_MODES.has(lower)) return { mode: lower as "on" | "off" | "auto", pin: null };
   const slash = arg.indexOf("/");
-  if (slash <= 0 || slash !== arg.lastIndexOf("/")) return null;
+  if (slash < 0) {
+    // Bare model id, e.g. `/free beam-free`: accept anything the free
+    // detector recognizes so users don't have to spell the provider.
+    // matchSpec resolves it against the catalog (zen first) at pick time.
+    if (FREE_ID_SEGMENT.test(arg) && detectFree([arg]).length > 0) return { mode: "on", pin: arg };
+    return null;
+  }
+  if (slash === 0 || slash !== arg.lastIndexOf("/")) return null;
   const provider = arg.slice(0, slash);
   const modelID = arg.slice(slash + 1);
   if (!FREE_ID_SEGMENT.test(provider) || !FREE_ID_SEGMENT.test(modelID)) return null;
   if (FREE_MODES.has(provider.toLowerCase()) || FREE_MODES.has(modelID.toLowerCase())) return null;
   return { mode: "on", pin: `${provider}/${modelID}` };
+}
+
+// Git for Windows (MSYS2) rewrites a leading "/free ..." argv element into an
+// absolute Windows path before any native process sees it:
+//   opencode run "/free opencode-go/beam-free"
+// arrives as "C:/Program Files/Git/free opencode-go/beam-free".
+// Recover the argument so the CLI keeps working from Git Bash. Only a path
+// whose final segment is exactly "free" qualifies, and the recovered tail must
+// parse as a real /free argument, so ordinary prompts are left untouched.
+function demangleFreeArgument(raw: string): string | null {
+  const m = /^[A-Za-z]:[\\/][\s\S]*[\\/]free(?:[ \t]+([\s\S]*))?$/.exec(raw.trim());
+  if (m === null) return null;
+  const tail = (m[1] ?? "").trim();
+  if (tail !== "" && parseFreeArgumentCore(tail) === null) return null;
+  return tail;
+}
+
+function parseFreeArgument(
+  raw: string,
+): { mode: "on" | "off" | "auto"; pin: string | null } | null {
+  const arg = raw.trim();
+  const direct = parseFreeArgumentCore(arg);
+  if (direct !== null) return direct;
+  const demangled = demangleFreeArgument(arg);
+  return demangled === null ? null : parseFreeArgumentCore(demangled);
+}
+
+/** Git Bash path mangling is repaired before any /free argument is interpreted. */
+function normalizeFreeArgument(raw: string): string {
+  const arg = raw.trim();
+  const demangled = demangleFreeArgument(arg);
+  return demangled === null ? arg : demangled;
 }
 
 type SessionStateWithPin = SessionState & { preferredId?: string };
@@ -745,8 +819,11 @@ async function freeCommandStatus(sessionID: string, raw: string): Promise<FreeCo
   if (policy.mode === "off") {
     return { text: POLICY_OFF_TEXT, policyOff: true, summary: false };
   }
-  const parsed = parseFreeArgument(raw);
-  const shown = raw.trim().slice(0, 64);
+  const arg = normalizeFreeArgument(raw);
+  const parsed = parseFreeArgument(arg);
+  // /free run inside a subagent session takes ownership of its own mode.
+  if (parsed !== null) delete state.inheritFrom;
+  const shown = arg.slice(0, 64);
   let text: string;
   let summary = false;
   if (parsed === null) {
@@ -836,6 +913,7 @@ async function toolExecuteBefore(
   }
   const chain = candidateList(await fetchCatalog(), {
     sessionID: input.sessionID,
+    pin: (state as SessionStateWithPin).preferredId ?? null,
     role,
     zdrOnly: policy.mode === "zdr-only",
     policy,
@@ -883,7 +961,9 @@ interface ToolAfterOutput {
 }
 
 /** Free-tier failure signatures (enforcement: HTTP 429 / FreeUsageLimitError). */
-const RATE_LIMIT_RE = /429|FreeUsageLimitError|rate.?limit|quota/i;
+// "usage.?limit" covers V2's drain error text, "Free usage limit reached",
+// which carries neither the error class name nor a status code.
+const RATE_LIMIT_RE = /429|FreeUsageLimitError|usage.?limit|rate.?limit|quota/i;
 
 /** Failover state kept alongside the todo-4 SessionState, never inside it. */
 interface FailoverState {
@@ -1174,6 +1254,50 @@ function unwrapCommandText(text: string): string {
   return trimmed;
 }
 
+/** Normalize a textual /free invocation, including Git Bash's rewritten path. */
+function freeCommandText(text: string): string | null {
+  const trimmed = unwrapCommandText(text);
+  if (trimmed === "/free" || trimmed.startsWith("/free ")) return trimmed;
+  const demangled = demangleFreeArgument(trimmed);
+  if (demangled === null) return null;
+  return demangled === "" ? "/free" : `/free ${demangled}`;
+}
+
+// Expanded markdown-template detector. When a free.md custom command shadows
+// the native V2 registration (config commands activate in `post`, after user
+// plugins, and every definition shares one name-keyed map), its `execute`
+// never runs and this hook sees the EXPANDED template instead of "/free ...".
+// Our free.md opens with "Arguments received: $ARGUMENTS", so the expanded
+// prompt opens with "Arguments received: <args>". Returns the <args> text,
+// or null when the prompt is not such a template. A hand-typed prompt that
+// happens to open with that line is vanishingly rare, and answering it with
+// a status echo is benign.
+function matchExpandedFreeTemplate(text: string): string | null {
+  const firstLine = text.split("\n", 1)[0].trim();
+  const prefix = "Arguments received:";
+  if (!firstLine.startsWith(prefix)) return null;
+  return firstLine.slice(prefix.length).trim();
+}
+
+// Shared answer path for every textual /free invocation the prompt hook can
+// see: literal "/free ..." (`opencode run`, TUI fallback) and the expanded
+// markdown template above. Records mode/pin via freeCommandStatus and turns
+// this turn into a status echo so the model never reads it as a task.
+async function v2AnswerFreeCommand(
+  sessionID: string,
+  prompt: { text: string },
+  arg: string,
+): Promise<void> {
+  const result = await freeCommandStatus(sessionID, arg);
+  const state = getSession(sessionID);
+  if (state.mode === "off" || result.policyOff) await v2RestoreIfNeeded(sessionID, state);
+  const status = result.summary ? `${result.text} ${await catalogSummary()}` : result.text;
+  // The command already triggered a model turn, so make that turn a clean
+  // echo instead of letting the model interpret the status as a task.
+  const flat = status.replace(/\s+/g, " ").trim();
+  prompt.text = `Do not call any tools. Reply with the quoted status line verbatim and nothing else: ${JSON.stringify(flat)}`;
+}
+
 async function v2OnPrompt(event: any): Promise<void> {
   try {
     const sessionID = typeof event?.sessionID === "string" ? event.sessionID : "";
@@ -1183,7 +1307,9 @@ async function v2OnPrompt(event: any): Promise<void> {
     const rawText = typeof prompt.text === "string" ? prompt.text : "";
     // Admission ticket: a newer prompt admitted while this hook awaits its
     // own catalog/policy reads owns the session model, not this one.
-    const ticketState = getSession(sessionID);
+    // resolveSession (not getSession): getSession would create the entry as
+    // "off" first and poison parentID inheritance for subagent sessions.
+    const ticketState = await resolveSession(sessionID);
     ticketState.promptSeq = (ticketState.promptSeq ?? 0) + 1;
     const mySeq = ticketState.promptSeq;
     const parsed = parseFreeTag(rawText);
@@ -1192,19 +1318,20 @@ async function v2OnPrompt(event: any): Promise<void> {
 
     // `opencode run` sends "/free ..." as literal prompt text (no slash parser).
     // Handle it here so the CLI has the same command surface as the TUI.
-    const trimmed = unwrapCommandText(rawText);
-    if (trimmed === "/free" || trimmed.startsWith("/free ")) {
-      const arg = trimmed.slice("/free".length).trim();
-      const result = await freeCommandStatus(sessionID, arg);
-      const state = getSession(sessionID);
-      if (state.mode === "off" || result.policyOff) await v2RestoreIfNeeded(sessionID, state);
-      const status = result.summary
-        ? `${result.text} ${await catalogSummary()}`
-        : result.text;
-      // `run` always executes a model turn, so make that turn a clean echo
-      // instead of letting the model interpret the status as a task.
-      const flat = status.replace(/\s+/g, " ").trim();
-      prompt.text = `Do not call any tools. Reply with the quoted status line verbatim and nothing else: ${JSON.stringify(flat)}`;
+    // freeCommandText also recovers Git Bash's path-rewritten form
+    // ("C:/Program Files/Git/free ...").
+    const command = freeCommandText(rawText);
+    if (command !== null) {
+      await v2AnswerFreeCommand(sessionID, prompt, command.slice("/free".length).trim());
+      return;
+    }
+
+    // A shadowing free.md arrives here as its expanded template (see
+    // matchExpandedFreeTemplate). Without this branch the pin never engages
+    // and a weak model reads the template as a research task.
+    const mdArg = matchExpandedFreeTemplate(rawText);
+    if (mdArg !== null) {
+      await v2AnswerFreeCommand(sessionID, prompt, mdArg);
       return;
     }
 
@@ -1245,7 +1372,8 @@ async function v2OnPrompt(event: any): Promise<void> {
       await v2RestoreIfNeeded(sessionID, state, true);
       if (!state.exhaustedNotified) {
         state.exhaustedNotified = true;
-        await notify(
+        // Not awaited: this runs inside the prompt hook, before admission.
+        void notify(
           "free: no free candidate left for this session; using the paid model.",
           sessionID,
         );
@@ -1317,7 +1445,8 @@ async function v2FailOver(
   const restored = await v2RestoreIfNeeded(sessionID, state, true);
   if (!state.exhaustedNotified) {
     state.exhaustedNotified = true;
-    await notify(
+    // Not awaited: callers are the retry and tool hooks, which hold the turn.
+    void notify(
       `free: rate-limited on ${failed}; free candidates exhausted.${restored ? " Restored the paid model." : ""}`,
       sessionID,
     );
@@ -1357,38 +1486,59 @@ async function v2OnRetry(event: any): Promise<void> {
   }
 }
 
+// V2's native delegation tool. Its input names the child agent `agent` and takes
+// `model` as a "provider/model[#variant]" STRING. oh-my-opencode-slim stamps its
+// preset model (e.g. "opencode-go/deepseek-v4.1-flash#max") into input.model
+// from its own execute.before hook, and only when input.model is not already a
+// string. Hook order between plugins is not guaranteed, so this hook always
+// overwrites: whichever runs first, the child is created on the free model and
+// slim's wrapper sees a string model and preserves it (preserveModel).
+const V2_DELEGATION_TOOL = "subagent";
+
 async function v2OnToolBefore(event: any): Promise<void> {
   try {
     const tool = typeof event?.tool === "string" ? event.tool : "";
-    // Core `task` has no model parameter (see toolExecuteBefore): never injected.
-    if (!DELEGATION_TOOLS.has(tool)) return;
+    const isSubagent = tool.toLowerCase() === V2_DELEGATION_TOOL;
+    if (!isSubagent && !DELEGATION_TOOLS.has(tool)) return;
     const sessionID = typeof event?.sessionID === "string" ? event.sessionID : "";
     if (sessionID === "") return;
+    const input = event?.input;
+    if (input === null || typeof input !== "object") return;
+    // Resuming an existing child: its model is session state, and the child's
+    // own prompt hook (which inherits mode and pin) routes it.
+    if (isSubagent && typeof input.sessionID === "string" && input.sessionID !== "") return;
     const state = await resolveSession(sessionID);
     if (state.mode === "off") return;
     const policy = await getPolicy(sessionID);
     if (policy.mode === "off") return;
+    const rawRole = isSubagent ? (input.agent ?? input.subagent_type) : input.subagent_type;
+    const childRole =
+      typeof rawRole === "string" && rawRole.trim() !== "" ? rawRole.trim() : undefined;
     let role: string | undefined;
     if (state.mode === "auto") {
-      const raw = event?.input?.subagent_type;
-      role = typeof raw === "string" && raw.trim() !== "" ? raw.trim() : undefined;
+      role = childRole;
       if (role === undefined || !effectiveAutoRoles(policy).has(role)) return;
     }
     const chain = candidateList(await fetchCatalog(), {
       sessionID,
+      pin: (state as SessionStateWithPin).preferredId ?? null,
       role,
       zdrOnly: policy.mode === "zdr-only",
       policy,
     });
     const chosen = firstAvailable(chain, state.failedIds);
     if (chosen === null) return;
-    const input = event?.input;
-    if (input === null || typeof input !== "object") return;
     try {
-      (input as { model?: ModelRef }).model = {
-        providerID: chosen.pick.providerID,
-        modelID: chosen.pick.modelID,
-      };
+      if (isSubagent) {
+        // No #variant: a paid preset's variant (e.g. "max") need not exist on
+        // the free model.
+        input.model = `${chosen.pick.providerID}/${chosen.pick.modelID}`;
+      } else {
+        (input as { model?: ModelRef }).model = {
+          providerID: chosen.pick.providerID,
+          modelID: chosen.pick.modelID,
+        };
+      }
     } catch {
       // frozen args: best-effort
     }
@@ -1401,7 +1551,8 @@ async function v2OnToolAfter(event: any): Promise<void> {
   try {
     if (event?.status !== "error") return;
     const tool = typeof event?.tool === "string" ? event.tool : "";
-    if (tool !== "task" && !DELEGATION_TOOLS.has(tool)) return;
+    if (tool !== "task" && tool.toLowerCase() !== V2_DELEGATION_TOOL && !DELEGATION_TOOLS.has(tool))
+      return;
     const sessionID = typeof event?.sessionID === "string" ? event.sessionID : "";
     if (sessionID === "") return;
     if (!RATE_LIMIT_RE.test(harvestFailureText(event?.error))) return;
@@ -1456,7 +1607,7 @@ async function v2Setup(ctx: V2Context): Promise<() => Promise<void>> {
       editor.add({
         name: "free",
         description:
-          "Flip this session between free and paid model routing (on, off, auto, or provider/model-id)",
+          "Flip this session between free and paid model routing (on, off, auto, or model-id | provider/model-id)",
         execute: v2CommandExecute,
       });
     }),
@@ -1821,7 +1972,11 @@ async function getPolicy(sessionID: string): Promise<Policy> {
     policyCache.set(sessionID, { dir, mtimeMs, globalPath: gFile, globalMtimeMs: gMtimeMs, policy });
     if (warns.length > 0) {
       toastedSessions.add(sessionID);
-      for (const warn of warns) await notify(warn, sessionID);
+      // Fire-and-forget: getPolicy runs inside prompt/tool hooks, and an awaited
+      // notice (up to 2s each) would hold up admission of the user's turn.
+      void (async () => {
+        for (const warn of warns) await notify(warn, sessionID);
+      })();
     }
     return policy;
   } catch {

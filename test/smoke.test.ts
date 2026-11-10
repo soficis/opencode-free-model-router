@@ -105,7 +105,16 @@ check(pin.model.providerID === "opencode-go" && pin.model.modelID === "iceman-co
 // Project policy zdr-only: a blocked (trainer) pin must fall through to a ZDR-safe id.
 sessionDirs.set("p-zdr", join(PROJ, "fixtures", "zdr-only"));
 const zdr = await routeOnce("p-zdr", "@free mimo-v2.6-flash-free x");
-check(["opencode/beam-free", "opencode/crouton-alpha-free", "opencode/deepseek-v4.1-flash-free", "opencode/flint-40b-free", "opencode/glm-5.3-flash-free", "opencode/iceman-free", "opencode/inkling-2-small-free", "opencode-go/beam-free", "opencode-go/crouton-alpha-free", "opencode-go/iceman-contributor-free"].includes(modelKey(zdr.model)), "zdrOnly restricts to ZDR-safe ids");
+check(["opencode/beam-free", "opencode/crouton-alpha-free", "opencode/deepseek-v4.1-flash-free", "opencode/flint-40b-free", "opencode/glm-5.3-flash-free", "opencode/iceman-free", "opencode/longcat-2.5-free", "opencode-go/beam-free", "opencode-go/crouton-alpha-free", "opencode-go/iceman-contributor-free", "opencode-go/longcat-2.5-free"].includes(modelKey(zdr.model)), "zdrOnly restricts to ZDR-safe ids");
+
+// "ling-" is boundary-matched, so it deliberately does NOT catch "inkling-...":
+// the family needs its own entry or a documented trainer routes under zdr-only.
+sessionDirs.set("p-zdr-ink", join(PROJ, "fixtures", "zdr-only"));
+const ink = await routeOnce("p-zdr-ink", "@free inkling-2-small-free x");
+check(
+  modelKey(ink.model) !== "opencode/inkling-2-small-free" && ink.text === "x",
+  "zdrOnly blocks inkling-2-small-free",
+);
 
 const allMode = await routeOnce("p-all", "@free mimo-v2.6-flash-free x");
 check(allMode.model.modelID === "mimo-v2.6-flash-free", "zdrOnly false = all mode");
@@ -251,6 +260,31 @@ const fParent1 = await routeOnce(parF, "@free parent first");
 await toolAfter(parF, "HTTP 429 Too Many Requests");
 const childF1 = await routeOnce("child-f", "@free child first");
 check(modelKey(childF1.model) === modelKey(fParent1.model), "E: child does not inherit parent's failedIds (fresh chain)");
+
+// ---- Section 3b: a /free pin follows subagents, not just the parent ------
+// Helpers: run the /free command and read back the status text it reports.
+async function freeArgs(sessionID: string, args: string): Promise<string> {
+  const out: { parts: Array<{ type: string; text: string }> } = { parts: [] };
+  await hooks["command.execute.before"]({ command: "free", sessionID, arguments: args }, out);
+  return out.parts.length > 0 ? String((out.parts[0] as unknown as { text?: unknown })?.text ?? "") : "";
+}
+
+// Bare ids (no provider slash) are accepted: the catalog resolves them.
+const barePinText = await freeArgs("pin-bare-par", "beam-free");
+check(barePinText.indexOf("Preferred free model recorded: beam-free") !== -1, "P: /free accepts a bare model id as a pin");
+const bareRouted = await routeOnce("pin-bare-par", "untagged turn");
+check(modelKey(bareRouted.model) === "opencode/beam-free", "P: a bare /free pin routes the parent session");
+
+const bareBogus = await freeArgs("pin-bare-bogus", "not-a-model");
+check(bareBogus.indexOf("unknown argument") !== -1, "P: /free still rejects a non-free bare id");
+
+// The pin (not just the mode) is inherited: the research role default is
+// deepseek-v4.1-flash-free, so a crouton pin on the child proves inheritance.
+const pinPar = "pin-inherit-par";
+sessionParents.set("pin-inherit-child", pinPar);
+await freeArgs(pinPar, "crouton-alpha-free");
+const pinChild = await routeOnce("pin-inherit-child", "untagged research turn", { agent: "research" });
+check(modelKey(pinChild.model) === "opencode/crouton-alpha-free", "P: child session inherits the parent's /free pin");
 
 // ---- Section 4: prefer (global + project, merged per role) -----------------
 // Fixture ids must exist in the plugin's PINNED catalog: prefer-ids use
@@ -1002,6 +1036,37 @@ check(
 );
 check(g4decision.retry === true, "G: V2 retry hook keeps retrying while a candidate remains");
 
+// G4b: V2's drain error for an exhausted free tier says "Free usage limit
+// reached" with no status code and no error class name. It must still fail over.
+v2Session("v2-usage-limit");
+await v2Hooks.get("prompt")!({ sessionID: "v2-usage-limit", prompt: { text: "@free go" } });
+const g4bFirst = v2Sessions.get("v2-usage-limit")!.model.id;
+await v2Hooks.get("retry")!({
+  sessionID: "v2-usage-limit",
+  model: { providerID: "opencode", id: g4bFirst },
+  error: { type: "AI.Error", message: "Free usage limit reached. Free models work in OpenCode" },
+  attempt: 1,
+  decision: { retry: true },
+});
+const g4bSecond = v2Sessions.get("v2-usage-limit")!.model.id;
+check(
+  g4bSecond !== g4bFirst && isFreeId(g4bSecond),
+  "G: 'Free usage limit reached' (no status, no class) triggers failover",
+);
+
+// G4c: a host whose synthetic() never settles must not hold up prompt
+// admission: notices raised inside the prompt hook are fire-and-forget.
+{
+  const realSynthetic = v2ctx.session.synthetic;
+  v2ctx.session.synthetic = () => new Promise(() => {});
+  v2Session("v2-hung-notice");
+  const t0 = Date.now();
+  await v2Hooks.get("prompt")!({ sessionID: "v2-hung-notice", prompt: { text: "@free hi" } });
+  const took = Date.now() - t0;
+  v2ctx.session.synthetic = realSynthetic;
+  check(took < 1000, `G: prompt hook is not blocked by a hung notice (took ${took}ms)`);
+}
+
 // G5: auto mode stamps an allowlisted delegation, exactly like V1.
 v2Session("v2-tool");
 await v2Command.execute({ sessionID: "v2-tool", prompt: { text: "auto" } });
@@ -1046,6 +1111,146 @@ check(r1.text === "first" && r2.text === "second", "G: concurrent prompts both s
 check(
   v2SwitchCalls.filter((c) => c.sessionID === "v2-race").length - raceBase === 1,
   "G: concurrent prompts switch the session model exactly once",
+);
+
+// G6c: a /free pin survives into subagent sessions. The child prompt hook
+// inherits mode AND pin (the admission ticket must not poison inheritance),
+// and delegation stamping uses the pin instead of the role default.
+v2Session("v2-pin-par", "build");
+await v2Command.execute({ sessionID: "v2-pin-par", prompt: { text: "crouton-alpha-free" } });
+v2Session("v2-pin-child", "research", "v2-pin-par");
+await v2Hooks.get("prompt")!({ sessionID: "v2-pin-child", prompt: { text: "do research" } });
+const pinChildCalls = v2SwitchCalls.filter((c) => c.sessionID === "v2-pin-child");
+check(
+  pinChildCalls.length === 1 && pinChildCalls[0].model.id === "crouton-alpha-free",
+  "G: V2 child session inherits the /free pin through the prompt hook",
+);
+v2Session("v2-tool-pin");
+await v2Command.execute({ sessionID: "v2-tool-pin", prompt: { text: "beam-free" } });
+const gPinInput: any = { subagent_type: "explore" };
+await v2ToolHooks.get("execute.before")!({
+  tool: "delegate_task",
+  sessionID: "v2-tool-pin",
+  input: gPinInput,
+});
+check(
+  gPinInput.model !== undefined && gPinInput.model.modelID === "beam-free",
+  "G: V2 tool-before stamps the /free pin, not the role default",
+);
+
+// G6e: V2 delegation goes through the native `subagent` tool (input.agent,
+// string input.model). oh-my-opencode-slim stamps its preset model there,
+// e.g. "opencode-go/deepseek-v4.1-flash#max"; this is the exact path that
+// sent research subagents to DeepSeek while the user had beam-free pinned.
+v2Session("v2-sub-pin", "orchestrator");
+await v2Command.execute({ sessionID: "v2-sub-pin", prompt: { text: "opencode-go/beam-free" } });
+const subPin: any = { agent: "explorer", prompt: "research x", model: "opencode-go/deepseek-v4.1-flash#max" };
+await v2ToolHooks.get("execute.before")!({ tool: "subagent", sessionID: "v2-sub-pin", input: subPin });
+check(subPin.model === "opencode-go/beam-free", "G: V2 subagent tool is stamped with the /free pin over slim's preset model");
+const subPinFresh: any = { agent: "fixer", prompt: "fix y" };
+await v2ToolHooks.get("execute.before")!({ tool: "subagent", sessionID: "v2-sub-pin", input: subPinFresh });
+check(subPinFresh.model === "opencode-go/beam-free", "G: V2 subagent stamp is a provider/model string when none was set");
+const subResume: any = { agent: "explorer", prompt: "more", sessionID: "existing-child", model: "opencode-go/deepseek-v4.1-flash" };
+await v2ToolHooks.get("execute.before")!({ tool: "subagent", sessionID: "v2-sub-pin", input: subResume });
+check(subResume.model === "opencode-go/deepseek-v4.1-flash", "G: V2 subagent resume is left to the child's prompt hook");
+
+v2Session("v2-sub-auto", "orchestrator");
+await v2Command.execute({ sessionID: "v2-sub-auto", prompt: { text: "auto" } });
+const subAutoYes: any = { agent: "explorer", prompt: "r", model: "opencode-go/deepseek-v4.1-flash#max" };
+await v2ToolHooks.get("execute.before")!({ tool: "subagent", sessionID: "v2-sub-auto", input: subAutoYes });
+check(
+  typeof subAutoYes.model === "string" && isFreeId(subAutoYes.model.split("/")[1]),
+  "G: V2 auto stamps an allowlisted subagent agent with a free model",
+);
+const subAutoNo: any = { agent: "fixer", prompt: "f", model: "opencode-go/deepseek-v4.1-flash#max" };
+await v2ToolHooks.get("execute.before")!({ tool: "subagent", sessionID: "v2-sub-auto", input: subAutoNo });
+check(subAutoNo.model === "opencode-go/deepseek-v4.1-flash#max", "G: V2 auto leaves a non-allowlisted subagent alone");
+
+v2Session("v2-sub-off", "orchestrator");
+const subOff: any = { agent: "explorer", prompt: "r", model: "opencode-go/deepseek-v4.1-flash#max" };
+await v2ToolHooks.get("execute.before")!({ tool: "subagent", sessionID: "v2-sub-off", input: subOff });
+check(subOff.model === "opencode-go/deepseek-v4.1-flash#max", "G: V2 subagent is untouched while /free is off");
+
+// G6f: children follow the parent's LIVE mode: /free off in the parent reaches
+// a child that already exists, and a re-pin reaches it too.
+v2Session("v2-live-par", "orchestrator");
+await v2Command.execute({ sessionID: "v2-live-par", prompt: { text: "opencode-go/beam-free" } });
+v2Session("v2-live-kid", "explorer", "v2-live-par");
+await v2Hooks.get("prompt")!({ sessionID: "v2-live-kid", prompt: { text: "work" } });
+check(v2Sessions.get("v2-live-kid")!.model.id === "beam-free", "G: child routes to the parent's pin");
+await v2Command.execute({ sessionID: "v2-live-par", prompt: { text: "opencode/crouton-alpha-free" } });
+await v2Hooks.get("prompt")!({ sessionID: "v2-live-kid", prompt: { text: "more work" } });
+check(v2Sessions.get("v2-live-kid")!.model.id === "crouton-alpha-free", "G: child follows a re-pin in the parent");
+await v2Command.execute({ sessionID: "v2-live-par", prompt: { text: "off" } });
+await v2Hooks.get("prompt")!({ sessionID: "v2-live-kid", prompt: { text: "after off" } });
+check(
+  v2Sessions.get("v2-live-kid")!.model.id === PAID.modelID,
+  "G: /free off in the parent restores an existing child's paid model",
+);
+
+// G6d: a shadowing free.md (markdown commands register last and win over the
+// native registration, so its execute never runs) reaches the prompt hook as
+// the EXPANDED template. The hook reads the "Arguments received" line as
+// /free <args>: the pin engages and the turn becomes a status echo, never a
+// research task. This is the exact prompt a weak model received unhandled.
+v2Session("v2-md-shadow");
+const gMdPrompt = {
+  text: "Arguments received: opencode-go/beam-free\n\nDo not call any tools. Do not delegate to subagents. Your only job is to echo the router status line verbatim and nothing else.",
+};
+await v2Hooks.get("prompt")!({ sessionID: "v2-md-shadow", prompt: gMdPrompt });
+check(
+  gMdPrompt.text.startsWith("Do not call any tools.") &&
+    gMdPrompt.text.includes("opencode-go/beam-free"),
+  "G: V2 prompt hook turns an expanded free.md template into a status echo",
+);
+const gMdNext = { text: "plain turn after shadowed pin" };
+await v2Hooks.get("prompt")!({ sessionID: "v2-md-shadow", prompt: gMdNext });
+const mdShadowCalls = v2SwitchCalls.filter((c) => c.sessionID === "v2-md-shadow");
+check(
+  mdShadowCalls.length === 1 && mdShadowCalls[0].model.id === "beam-free",
+  "G: V2 pin from an expanded free.md template routes the next turn",
+);
+// An argument-less template echoes usage without changing the mode.
+v2Session("v2-md-bare");
+const gMdBare = { text: "Arguments received: \n\nDo not call any tools." };
+await v2Hooks.get("prompt")!({ sessionID: "v2-md-bare", prompt: gMdBare });
+check(
+  gMdBare.text.includes("no argument"),
+  "G: V2 argument-less free.md template echoes usage",
+);
+
+// G6h: Git for Windows rewrites a leading "/free ..." argv element into an
+// absolute path before opencode sees it:
+//   opencode run "/free opencode-go/beam-free"
+//   -> "C:/Program Files/Git/free opencode-go/beam-free"
+// The prompt hook recovers the command instead of treating it as a task.
+v2Session("v2-gitbash");
+const gBash = { text: "C:/Program Files/Git/free opencode-go/beam-free" };
+await v2Hooks.get("prompt")!({ sessionID: "v2-gitbash", prompt: gBash });
+check(
+  gBash.text.startsWith("Do not call any tools.") &&
+    gBash.text.includes("Preferred free model recorded: opencode-go/beam-free"),
+  "G: V2 recovers a Git Bash path-mangled /free prompt",
+);
+const gBashNext = { text: "turn after the recovered pin" };
+await v2Hooks.get("prompt")!({ sessionID: "v2-gitbash", prompt: gBashNext });
+const gBashCalls = v2SwitchCalls.filter((c) => c.sessionID === "v2-gitbash");
+check(
+  gBashCalls.length === 1 && gBashCalls[0].model.id === "beam-free",
+  "G: the recovered Git Bash pin routes the next turn",
+);
+
+// The command entrypoint reads its argument from prompt.text, so a pasted
+// mangled path must resolve there too.
+v2Session("v2-gitbash-cmd");
+await v2Command.execute({
+  sessionID: "v2-gitbash-cmd",
+  prompt: { text: "C:/Program Files/Git/free opencode-go/crouton-alpha-free" },
+});
+await v2Hooks.get("prompt")!({ sessionID: "v2-gitbash-cmd", prompt: { text: "command arg turn" } });
+check(
+  v2Sessions.get("v2-gitbash-cmd")!.model.id === "crouton-alpha-free",
+  "G: V2 command recovers a Git Bash path-mangled argument",
 );
 
 // G7: setup returns a cleanup that disposes every registration.
