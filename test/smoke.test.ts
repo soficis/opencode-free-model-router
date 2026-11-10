@@ -1010,6 +1010,29 @@ check(
   "G: V2 native /free off restores the paid model",
 );
 
+// G2b: notices carry a description (the desktop app hides synthetic messages
+// without one), and a status posted by two instances shows once.
+v2Session("v2-notice");
+const noticeBase = v2Synthetics.length;
+await v2Command.execute({ sessionID: "v2-notice", prompt: { text: "on" } });
+await v2Command.execute({ sessionID: "v2-notice", prompt: { text: "on" } });
+const noticeNew = v2Synthetics.slice(noticeBase).filter((s) => s.sessionID === "v2-notice" && s.text.includes("free mode: on"));
+check(noticeNew.length === 1, `G: duplicate /free status is posted once (got ${noticeNew.length})`);
+check(
+  String((noticeNew[0] as any)?.description ?? "").startsWith("/free mode: on"),
+  "G: the row label is the notice itself, prefixed with /free",
+);
+check(
+  /Next turn: [a-z-]+\/[a-z0-9.-]+-free\./.test(noticeNew[0]?.text ?? ""),
+  "G: /free on names the free model the next turn will use",
+);
+v2Session("v2-notice-pin");
+await v2Command.execute({ sessionID: "v2-notice-pin", prompt: { text: "opencode-go/beam-free" } });
+check(
+  v2Synthetics.some((s) => s.sessionID === "v2-notice-pin" && s.text.includes("Next turn: opencode-go/beam-free.")),
+  "G: a pinned /free reports the pin as the next turn's model",
+);
+
 // G3: opencode run sends slash commands as literal prompt text; the prompt hook
 // must recognize /free so the CLI has the same command surface.
 v2Session("v2-cli", "explore");

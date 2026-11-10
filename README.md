@@ -226,7 +226,7 @@ V2 has no model field on a prompt. The plugin's `prompt` hook runs before the tu
 ### V2 caveats
 
 - **Session-level model.** The switch is per session, not per request. Normal sequential use is per-turn. Two prompts admitted at the same time race; the latest prompt wins and the stale one is dropped without switching (V2 prompt-sequence guard).
-- **Notices are session messages.** A V2 server plugin cannot show a TUI toast. Status and warnings are admitted as synthetic messages instead. V1 still uses toasts in the TUI; headless V1 (`opencode run`) writes `[free-model-router] ...` to the server log instead.
+- **Notices are session messages.** A V2 server plugin cannot show a TUI toast. Status and warnings are admitted as synthetic messages instead. In the desktop app each one appears as a collapsed **Updates** row whose visible line is the notice itself, prefixed `/free` (for example `/free mode: on for this session. Next turn: opencode-go/beam-free.`). They cost no tokens and never reach the model. V1 still uses toasts in the TUI; headless V1 (`opencode run`) writes `[free-model-router] ...` to the server log instead.
 - **`/free` is native in V2 — do not install `command/free.md` there.** A `free.md` in any `command/` dir registers after the plugin and shadows the native command; the plugin's `execute` never runs and the model receives the raw template. (If one slips through anyway, the prompt hook now recognizes the expanded `Arguments received:` template and still records the pin.)
 - **`title`, `compaction`, and `summary`** are still not routable in V2.
 
@@ -268,7 +268,7 @@ bun test/smoke.test.ts
 
 Or with Node: `npx -y tsx test/smoke.test.ts`
 
-The suite runs offline against pinned fixtures (154 tests). It covers the V1 hook surface, V2 prompt/idle/retry/tool hooks with a fake host, concurrent-prompt race handling, headless (no-TUI) notice fallback, tag parsing, 429 failover, project policy switching, subagent inheritance (live parent mode and pin, V2 `subagent` tool stamping over oh-my-opencode-slim presets), preference order, and the native `/free` command.
+The suite runs offline against pinned fixtures (158 tests). It covers the V1 hook surface, V2 prompt/idle/retry/tool hooks with a fake host, concurrent-prompt race handling, headless (no-TUI) notice fallback, tag parsing, 429 failover, project policy switching, subagent inheritance (live parent mode and pin, V2 `subagent` tool stamping over oh-my-opencode-slim presets), preference order, and the native `/free` command.
 
 ---
 

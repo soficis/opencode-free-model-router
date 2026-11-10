@@ -851,10 +851,25 @@ async function freeCommandStatus(sessionID: string, raw: string): Promise<FreeCo
   } else if (parsed.mode === "on") {
     state.mode = "on";
     if (parsed.pin !== null) (state as SessionStateWithPin).preferredId = parsed.pin;
+    // Name the model the next turn will actually use, so "on" is not a guess.
+    const next = firstAvailable(
+      candidateList(await fetchCatalog(), {
+        sessionID,
+        pin: (state as SessionStateWithPin).preferredId ?? null,
+        role: "general",
+        zdrOnly: policy.mode === "zdr-only",
+        policy,
+      }),
+      state.failedIds,
+    );
+    const nextText =
+      next === null
+        ? " No free model is available right now; the paid model stays."
+        : ` Next turn: ${next.pick.providerID}/${next.pick.modelID}.`;
     text =
       parsed.pin === null
-        ? "free mode: on for this session. Messages route to a free model when one is available."
-        : `free mode: on for this session. Preferred free model recorded: ${parsed.pin}.`;
+        ? `free mode: on for this session.${nextText}`
+        : `free mode: on for this session. Preferred free model recorded: ${parsed.pin}.${nextText}`;
   } else {
     state.mode = "auto";
     delete (state as SessionStateWithPin).preferredId;
@@ -1830,6 +1845,15 @@ function policyWarnings(read: PolicyFileRead, label: string): string[] {
 const policyCache = new Map<string, PolicyCacheEntry>();
 const sessionMetaCache = new Map<string, { directory: string; parentID: string | null }>();
 const toastedSessions = new Set<string>();
+const recentNotices = new Map<string, number>();
+const NOTICE_DEDUPE_MS = 5000;
+
+// The desktop app labels every synthetic row "Updates"; a leading "/free"
+// tells the user which plugin spoke. Capped for the one-line row.
+function noticeLabel(message: string): string {
+  const body = message.startsWith("free") ? `/${message}` : `/free: ${message}`;
+  return body.length > 300 ? `${body.slice(0, 297)}...` : body;
+}
 interface PluginCtx {
   kind?: "v1" | "v2";
   client?: any;
@@ -1880,8 +1904,24 @@ async function notify(message: string, sessionID?: string, wake = false): Promis
     const pluginCtx = currentCtx();
     if (pluginCtx.kind === "v2" && pluginCtx.v2) {
       if (typeof sessionID !== "string" || sessionID === "") return;
+      // Several plugin instances can answer the same /free; post each notice
+      // once per session within a short window.
+      const key = `${sessionID}\u0000${message}`;
+      const now = Date.now();
+      const prev = recentNotices.get(key);
+      if (prev !== undefined && now - prev < NOTICE_DEDUPE_MS) return;
+      recentNotices.set(key, now);
+      if (recentNotices.size > 512) recentNotices.delete(recentNotices.keys().next().value as string);
       await withTimeout(
-        pluginCtx.v2.session.synthetic({ sessionID, text: message, resume: wake }),
+        // The desktop app shows a synthetic message as a collapsed "Updates"
+        // row whose only visible text is `description`; the body stays hidden.
+        // So the notice itself goes in description (capped for the row).
+        pluginCtx.v2.session.synthetic({
+          sessionID,
+          text: message,
+          description: noticeLabel(message),
+          resume: wake,
+        }),
         2000,
       );
       return;
